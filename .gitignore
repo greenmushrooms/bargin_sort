@@ -48,6 +48,9 @@ wheels/
 .DS_Store
 Thumbs.db
 
+# Claude
+.claude/
+
 # dbt
 target/
 dbt_packages/
