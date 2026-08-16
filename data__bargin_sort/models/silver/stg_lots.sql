@@ -66,22 +66,24 @@ renamed as (
         -- `bidAmount` on the Lot object is a fixed 123.45 placeholder on both
         -- the search endpoint and the lot page. The live figures are on the
         -- inline lotState, which is what anything price-related must use.
-        nullif(raw_json -> 'lotState' ->> 'highBid', '')::numeric  as high_bid,
-        nullif(raw_json -> 'lotState' ->> 'minBid', '')::numeric   as min_bid,
-        nullif(raw_json -> 'lotState' ->> 'buyNow', '')::numeric   as buy_now,
-        nullif(raw_json -> 'lotState' ->> 'bidCount', '')::int     as bid_count,
+        {{ safe_numeric("raw_json -> 'lotState' ->> 'highBid'") }}  as high_bid,
+        {{ safe_numeric("raw_json -> 'lotState' ->> 'minBid'") }}   as min_bid,
+        {{ safe_numeric("raw_json -> 'lotState' ->> 'buyNow'") }}   as buy_now,
+        {{ safe_int("raw_json -> 'lotState' ->> 'bidCount'") }}     as bid_count,
         raw_json -> 'lotState' ->> 'status'                        as lot_status,
         (raw_json -> 'lotState' ->> 'isClosed')::boolean           as is_closed,
         raw_json -> 'lotState' ->> 'timeLeft'                      as time_left,
-        nullif(raw_json -> 'lotState' ->> 'timeLeftSeconds', '')::numeric
+        {{ safe_numeric("raw_json -> 'lotState' ->> 'timeLeftSeconds'") }}
                                                                    as time_left_seconds,
 
-        nullif(raw_json ->> 'bidQuantity', '')::int     as bid_quantity,
-        nullif(raw_json ->> 'quantity', '')::int        as quantity,
+        -- Free text in practice (" x 2"), so keep both readings.
+        raw_json ->> 'bidQuantity'                      as bid_quantity_raw,
+        {{ safe_int("raw_json ->> 'bidQuantity'") }}    as bid_quantity,
+        {{ safe_int("raw_json ->> 'quantity'") }}       as quantity,
         raw_json ->> 'estimate'                         as estimate_text,
 
         (raw_json ->> 'shippingOffered')::boolean       as shipping_offered,
-        nullif(raw_json ->> 'pictureCount', '')::int    as picture_count,
+        {{ safe_int("raw_json ->> 'pictureCount'") }}   as picture_count,
 
         -- Present in the schema but never populated by the search endpoint;
         -- real distance is derived in silver_enhanced from postal centroids.

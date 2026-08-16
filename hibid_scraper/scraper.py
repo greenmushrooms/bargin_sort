@@ -38,6 +38,9 @@ USER_AGENT = (
 # Items per page (HiBid's default is 100, but we use smaller batches for stability)
 ITEMS_PER_PAGE = 100
 
+# How many times the end-of-results stub must repeat before it is believed.
+END_OF_RESULTS_CONFIRMATIONS = 3
+
 
 class IncompletePageError(Exception):
     """
@@ -234,6 +237,8 @@ class HiBidScraper:
         directly is faster but Cloudflare blocks it unpredictably, and a run
         that quietly loses pages to a 403 is worse than a slow one.
         """
+        stub_attempts = 0
+
         for attempt in range(retries):
             try:
                 logger.debug(f"Fetching: {url} (attempt {attempt + 1}/{retries})")
@@ -245,6 +250,20 @@ class HiBidScraper:
 
                 # An empty string means a clean end; None means failure.
                 if self._is_end_of_results(html):
+                    # The stub also shows up transiently mid-pagination, and
+                    # believing the first one truncates the scrape silently —
+                    # it looks like a clean finish, errors and all zero. Make
+                    # it prove itself on a fresh browser before accepting it.
+                    stub_attempts += 1
+                    if stub_attempts < END_OF_RESULTS_CONFIRMATIONS:
+                        logger.info(
+                            f"Empty stub for {url}; confirming "
+                            f"({stub_attempts}/{END_OF_RESULTS_CONFIRMATIONS})"
+                        )
+                        self._rotate_flaresolverr_session()
+                        time.sleep(2 * stub_attempts)
+                        continue
+                    logger.info(f"Confirmed end of results at {url}")
                     return ""
 
                 if not self._has_rendered_state(html):

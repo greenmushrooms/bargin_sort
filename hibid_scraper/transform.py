@@ -71,7 +71,16 @@ def run_dbt(
     result = dbtRunner().invoke(args)
 
     if not result.success:
-        raise RuntimeError(f"dbt {command} failed: {result.exception or 'see logs'}")
+        # result.exception is only set for whole-invocation failures. A model
+        # that errors leaves success False with the reason on the node, so
+        # without this the flow reports a useless "see logs".
+        failures = []
+        for node in getattr(result.result, "results", []) or []:
+            if str(node.status) in ("error", "fail", "NodeStatus.Error", "TestStatus.Fail"):
+                failures.append(f"{node.node.name}: {node.message}")
+
+        detail = "; ".join(failures) or str(result.exception) or "see dbt logs"
+        raise RuntimeError(f"dbt {command} failed — {detail}")
 
     models = []
     # A `run` returns RunExecutionResult; `test`/`seed` do too. Anything else

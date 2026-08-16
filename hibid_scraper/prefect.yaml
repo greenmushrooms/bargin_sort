@@ -19,6 +19,9 @@ deployments:
         networks:
           - project-hub-network
         env:
+          # Route the scraper's own loggers into Prefect's run logs; without
+          # this they go to container stdout and a failed run is undiagnosable.
+          PREFECT_LOGGING_EXTRA_LOGGERS: "scraper,database,transform,main,maintenance"
           # Cloudflare fallback. Requires flaresolverr on project-hub-network:
           #   docker network connect project-hub-network flaresolverr
           FLARESOLVERR_URL: "http://flaresolverr:8191/v1"
@@ -49,4 +52,4 @@ deployments:
           DB_USER: "{{ prefect.blocks.secret.bargin-sort--database-user }}"
           DB_PASSWORD: "{{ prefect.blocks.secret.bargin-sort--database-password }}"
           DB_NAME: "{{ prefect.blocks.secret.bargin-sort--database-name }}"
-          ZIP_CODE: "m8w3b7"
+          PREFECT_LOGGING_EXTRA_LOGGERS: "scraper,database,transform,main,maintenance"
