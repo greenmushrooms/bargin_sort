@@ -58,10 +58,14 @@ def cmd_stats(conn) -> None:
         """)
         categories = cursor.fetchall()
 
+        # zip_code is a per-run parameter, so it comes from the run rather
+        # than being repeated on every item row.
         cursor.execute("""
-            SELECT zip_code, COUNT(*) as count
-            FROM raw.hibid
-            GROUP BY zip_code
+            SELECT r.zip_code, COUNT(*) as count
+            FROM raw.hibid h
+            JOIN raw.scrape_runs r
+              ON r.sys_run_name = h.sys_run_name AND r.source = 'hibid'
+            GROUP BY r.zip_code
             ORDER BY count DESC
         """)
         zip_codes = cursor.fetchall()
@@ -126,18 +130,19 @@ def cmd_runs(conn) -> None:
 
     print("\nScrape Run History:")
     print("-" * 100)
-    print(f"{'ID':<5} {'Status':<12} {'Zip':<8} {'Radius':<8} {'Found':<8} {'Added':<8} {'Errors':<8} {'Started'}")
+    print(f"{'ID':<5} {'Source':<10} {'Status':<12} {'Zip':<8} {'Radius':<8} {'Found':<8} {'Ins':<8} {'Errors':<8} {'Started'}")
     print("-" * 100)
 
     for run in runs:
         started = str(run['started_at'])[:19]
         print(
             f"{run['id']:<5} "
+            f"{run['source']:<10} "
             f"{run['status']:<12} "
-            f"{run['zip_code']:<8} "
-            f"{run['radius_miles']:<8} "
+            f"{str(run['zip_code'] or '-'):<8} "
+            f"{str(run['radius_miles'] or '-'):<8} "
             f"{run['items_found']:<8} "
-            f"{run['items_added']:<8} "
+            f"{run['items_inserted']:<8} "
             f"{run['errors']:<8} "
             f"{started}"
         )
@@ -147,7 +152,16 @@ def cmd_item(conn, item_id: str) -> None:
     """Show full JSON for an item."""
     with conn.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute(
-            "SELECT * FROM raw.hibid WHERE item_id = %s", (item_id,)
+            """
+            SELECT h.*, r.zip_code, r.radius_miles
+            FROM raw.hibid h
+            LEFT JOIN raw.scrape_runs r
+              ON r.sys_run_name = h.sys_run_name AND r.source = 'hibid'
+            WHERE h.item_id = %s
+            ORDER BY h.scraped_at DESC
+            LIMIT 1
+            """,
+            (item_id,),
         )
         item = cursor.fetchone()
 
