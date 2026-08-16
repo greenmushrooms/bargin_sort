@@ -57,8 +57,6 @@ def scrape_hibid(config: Config, sys_run_name: str) -> dict:
             db.insert_item(
                 item_id=item_id,
                 raw_json=raw_json,
-                zip_code=config.zip_code,
-                radius_miles=config.radius_miles,
                 category=category,
                 sys_run_name=sys_run_name,
             )

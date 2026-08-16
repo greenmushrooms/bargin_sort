@@ -1,7 +1,7 @@
 version: 2
 
 models:
-  - name: stg_lots
+  - name: stg_hibid_lots
     description: >
       One row per lot per completed scrape run, restricted to lots HiBid
       actually returned as search results.

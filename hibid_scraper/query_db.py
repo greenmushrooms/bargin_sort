@@ -38,21 +38,21 @@ def connect_db(config: Config):
 def cmd_stats(conn) -> None:
     """Show database statistics."""
     with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-        cursor.execute("SELECT COUNT(*) as count FROM bronze.raw_auction_items")
+        cursor.execute("SELECT COUNT(*) as count FROM raw.hibid")
         item_count = cursor.fetchone()["count"]
 
-        cursor.execute("SELECT COUNT(*) as count FROM bronze.scrape_runs")
+        cursor.execute("SELECT COUNT(*) as count FROM raw.scrape_runs")
         run_count = cursor.fetchone()["count"]
 
         cursor.execute("""
             SELECT MIN(scraped_at) as oldest, MAX(scraped_at) as newest
-            FROM bronze.raw_auction_items
+            FROM raw.hibid
         """)
         dates = cursor.fetchone()
 
         cursor.execute("""
             SELECT category, COUNT(*) as count
-            FROM bronze.raw_auction_items
+            FROM raw.hibid
             GROUP BY category
             ORDER BY count DESC
         """)
@@ -60,7 +60,7 @@ def cmd_stats(conn) -> None:
 
         cursor.execute("""
             SELECT zip_code, COUNT(*) as count
-            FROM bronze.raw_auction_items
+            FROM raw.hibid
             GROUP BY zip_code
             ORDER BY count DESC
         """)
@@ -89,7 +89,7 @@ def cmd_recent(conn, limit: int = 10) -> None:
     with conn.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute("""
             SELECT item_id, scraped_at, category, raw_json
-            FROM bronze.raw_auction_items
+            FROM raw.hibid
             ORDER BY scraped_at DESC
             LIMIT %s
         """, (limit,))
@@ -118,7 +118,7 @@ def cmd_runs(conn) -> None:
     """Show scrape run history."""
     with conn.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute("""
-            SELECT * FROM bronze.scrape_runs
+            SELECT * FROM raw.scrape_runs
             ORDER BY started_at DESC
             LIMIT 20
         """)
@@ -147,7 +147,7 @@ def cmd_item(conn, item_id: str) -> None:
     """Show full JSON for an item."""
     with conn.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute(
-            "SELECT * FROM bronze.raw_auction_items WHERE item_id = %s", (item_id,)
+            "SELECT * FROM raw.hibid WHERE item_id = %s", (item_id,)
         )
         item = cursor.fetchone()
 
@@ -169,7 +169,7 @@ def cmd_search(conn, term: str) -> None:
     with conn.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute("""
             SELECT item_id, scraped_at, raw_json
-            FROM bronze.raw_auction_items
+            FROM raw.hibid
             WHERE raw_json::text ILIKE %s
             LIMIT 20
         """, (f"%{term}%",))

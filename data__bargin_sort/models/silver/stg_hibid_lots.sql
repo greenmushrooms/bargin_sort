@@ -26,9 +26,10 @@
 
 with completed_runs as (
 
-    select sys_run_name
-    from {{ source('bronze', 'scrape_runs') }}
-    where status = 'completed'
+    select sys_run_name, zip_code, radius_miles
+    from {{ source('raw', 'scrape_runs') }}
+    where source = 'hibid'
+      and status = 'completed'
     {% if target_run %}
       and sys_run_name = {{ dbt.string_literal(target_run) }}
     {% endif %}
@@ -37,8 +38,9 @@ with completed_runs as (
 
 source as (
 
-    select r.*
-    from {{ source('bronze', 'raw_auction_items') }} r
+    -- Scrape parameters come from the run, not from every row.
+    select r.*, c.zip_code, c.radius_miles
+    from {{ source('raw', 'hibid') }} r
     inner join completed_runs c on c.sys_run_name = r.sys_run_name
 
     {% if is_incremental() and not target_run %}
@@ -63,6 +65,7 @@ search_results as (
 renamed as (
 
     select
+        'hibid'::varchar                                as source,
         item_id,
         sys_run_name,
         scraped_at,

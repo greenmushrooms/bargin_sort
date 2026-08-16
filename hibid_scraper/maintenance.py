@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Bronze retention — Prefect flow.
+Raw-layer retention — Prefect flow.
 
-Drops whole monthly partitions of bronze.raw_auction_items older than the
+Drops whole monthly partitions of each raw source table older than the
 retention window, plus the matching scrape_runs rows.
 
 Dropping a partition is a DROP TABLE, so cost does not scale with row count and
 no VACUUM is left behind. Only partitions entirely older than the cutoff go, so
 the current month is never truncated part-way through.
 
-Silver is a projection of bronze, so after history is dropped the downstream
+Silver is a projection of raw, so after history is dropped the downstream
 models still describe lots whose raw rows are gone. Re-run dbt to bring them
 back in line:
 
@@ -22,7 +22,7 @@ import sys
 from prefect import flow, task
 
 from config import Config
-from database import Database, SCHEMA
+from database import Database, SCHEMA, TABLE
 
 RETENTION_MONTHS = 6
 
@@ -35,9 +35,9 @@ def setup_logging(level: str = "INFO") -> None:
     )
 
 
-@task(name="apply_bronze_retention")
-def apply_bronze_retention(config: Config, months: int, dry_run: bool) -> dict:
-    """Drop bronze partitions older than `months`."""
+@task(name="apply_raw_retention")
+def apply_raw_retention(config: Config, months: int, dry_run: bool) -> dict:
+    """Drop raw partitions older than `months`."""
     logger = logging.getLogger(__name__)
 
     db = Database(config)
@@ -60,12 +60,12 @@ def apply_bronze_retention(config: Config, months: int, dry_run: bool) -> dict:
                 JOIN pg_class p    ON p.oid = i.inhparent
                 JOIN pg_namespace n ON n.oid = c.relnamespace
                 WHERE n.nspname = %s
-                  AND p.relname = 'raw_auction_items'
-                  AND c.relname ~ '^raw_auction_items_[0-9]{{4}}_[0-9]{{2}}$'
+                  AND p.relname = %s
+                  AND c.relname ~ ('^' || %s || '_[0-9]{{4}}_[0-9]{{2}}$')
                   AND to_date(right(c.relname, 7), 'YYYY_MM') < date_trunc('month', %s::date)
                 ORDER BY c.relname
                 """,
-                (SCHEMA, cutoff),
+                (SCHEMA, TABLE, TABLE, cutoff),
             )
             targets = [row[0] for row in cursor.fetchall()]
 
@@ -80,7 +80,9 @@ def apply_bronze_retention(config: Config, months: int, dry_run: bool) -> dict:
                     "dry_run": True,
                 }
 
-            cursor.execute(f"SELECT {SCHEMA}.drop_partitions_before(%s)", (cutoff,))
+            cursor.execute(
+                f"SELECT {SCHEMA}.drop_partitions_before(%s, %s)", (TABLE, cutoff)
+            )
             dropped = [row[0] for row in cursor.fetchall()]
 
             cursor.execute(f"SELECT {SCHEMA}.delete_runs_before(%s)", (cutoff,))
@@ -101,23 +103,23 @@ def apply_bronze_retention(config: Config, months: int, dry_run: bool) -> dict:
         db.close()
 
 
-@flow(name="bronze_retention")
-def bronze_retention(months: int = RETENTION_MONTHS, dry_run: bool = False) -> dict:
-    """Drop bronze data older than `months`. Defaults to a 6 month window."""
+@flow(name="raw_retention")
+def raw_retention(months: int = RETENTION_MONTHS, dry_run: bool = False) -> dict:
+    """Drop raw data older than `months`. Defaults to a 6 month window."""
     setup_logging()
     logger = logging.getLogger(__name__)
-    logger.info(f"Bronze retention: months={months}, dry_run={dry_run}")
+    logger.info(f"Raw retention: months={months}, dry_run={dry_run}")
 
     config = Config.from_env()
-    result = apply_bronze_retention(config, months=months, dry_run=dry_run)
+    result = apply_raw_retention(config, months=months, dry_run=dry_run)
 
     if result["dropped_partitions"]:
         logger.warning(
-            "Bronze history was dropped — run `dbt run --full-refresh` so "
+            "Raw history was dropped — run `dbt run --full-refresh` so "
             "silver stops reporting lots whose raw rows no longer exist"
         )
     return result
 
 
 if __name__ == "__main__":
-    bronze_retention()
+    raw_retention()

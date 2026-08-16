@@ -10,7 +10,7 @@ with lots as (
         (raw_json -> 'auction_data' ->> 'id')::bigint as auction_id,
         raw_json -> 'auction_data'                    as auction,
         scraped_at
-    from {{ ref('stg_lots') }}
+    from {{ ref('stg_hibid_lots') }}
     where raw_json -> 'auction_data' ->> 'id' is not null
 
 ),

@@ -17,7 +17,7 @@ with latest_observation as (
             partition by item_id
             order by scraped_at desc
         ) as recency_rank
-    from {{ ref('stg_lots') }}
+    from {{ ref('stg_hibid_lots') }}
 
 ),
 
@@ -45,6 +45,7 @@ origin as (
 joined as (
 
     select
+        l.source,
         l.item_id,
         l.lot_id,
         l.lot_number,

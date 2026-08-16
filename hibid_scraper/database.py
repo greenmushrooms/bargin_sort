@@ -1,12 +1,16 @@
 """
 Database management for HiBid Scraper.
 
-Writes the bronze layer of the medallion: raw JSONB payloads, append-only, one
-row per lot per scrape. Nothing here updates or deletes, so silver and
-silver_enhanced can always be rebuilt by replaying this table.
+Writes the raw layer of the medallion: JSONB payloads, append-only, one row per
+lot per scrape. Nothing here updates or deletes, so silver and silver_enhanced
+can always be rebuilt by replaying this table.
 
-Schema: bronze (see sql/001_bronze.sql)
-Tables: raw_auction_items (monthly partitions), scrape_runs
+Schema: raw (see sql/003_raw_schema.sql)
+Tables: raw.hibid (monthly partitions), raw.scrape_runs
+
+One landing table per source. Only per-row facts are stored here — the job that
+produced the row, the item, and the payload. Per-run parameters such as zip code
+and radius live on raw.scrape_runs.
 """
 
 import logging
@@ -21,9 +25,11 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-SCHEMA = "bronze"
+SCHEMA = "raw"
+SOURCE = "hibid"
+TABLE = "hibid"
 
-DDL_PATH = Path(__file__).parent / "sql" / "001_bronze.sql"
+DDL_PATH = Path(__file__).parent / "sql" / "003_raw_schema.sql"
 
 # Rows buffered before a write. A full scrape is ~30k rows and committing each
 # one separately dominates the runtime.
@@ -64,16 +70,16 @@ class Database:
 
     def _init_schema(self) -> None:
         """
-        Apply the bronze DDL and make sure this month's partition exists.
+        Apply the raw DDL and make sure this month's partition exists.
 
-        The DDL lives in sql/001_bronze.sql so the schema has a single
+        The DDL lives in sql/003_raw_schema.sql so the schema has a single
         definition that can also be applied by hand or from a migration runner.
         """
         ddl = DDL_PATH.read_text()
         with self.conn.cursor() as cursor:
             cursor.execute(ddl)
         self.conn.commit()
-        logger.info("Bronze schema initialized")
+        logger.info("Raw schema initialized")
         self._ensure_partition(datetime.now(timezone.utc))
 
     def _ensure_partition(self, when: datetime) -> None:
@@ -83,23 +89,32 @@ class Database:
             return
         with self.conn.cursor() as cursor:
             cursor.execute(
-                f"SELECT {SCHEMA}.ensure_month_partition(%s)", (when.date(),)
+                f"SELECT {SCHEMA}.ensure_month_partition(%s, %s)",
+                (TABLE, when.date()),
             )
             partition = cursor.fetchone()[0]
         self.conn.commit()
         self._ensured_months.add(month_key)
-        logger.info(f"Bronze partition ready: {partition}")
+        logger.info(f"Raw partition ready: {partition}")
 
     def start_scrape_run(self, zip_code: str, radius_miles: int, test_mode: bool, sys_run_name: str = "") -> int:
         """Record the start of a scrape run. Returns run ID."""
         with self.conn.cursor() as cursor:
             cursor.execute(
                 f"""
-                INSERT INTO {SCHEMA}.scrape_runs (started_at, zip_code, radius_miles, test_mode, sys_run_name)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO {SCHEMA}.scrape_runs
+                (source, sys_run_name, started_at, zip_code, radius_miles, test_mode)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (datetime.now(timezone.utc), zip_code, radius_miles, test_mode, sys_run_name),
+                (
+                    SOURCE,
+                    sys_run_name,
+                    datetime.now(timezone.utc),
+                    zip_code,
+                    radius_miles,
+                    test_mode,
+                ),
             )
             run_id = cursor.fetchone()[0]
         self.conn.commit()
@@ -137,30 +152,23 @@ class Database:
         self,
         item_id: str,
         raw_json: dict,
-        zip_code: str,
-        radius_miles: int,
         category: Optional[str] = None,
         sys_run_name: str = "",
     ) -> None:
         """
-        Queue a raw auction item for insertion.
+        Queue a raw item for insertion.
 
-        No dedup — bronze keeps every observation of every lot, so a later run
+        No dedup — raw keeps every observation of every lot, so a later run
         never overwrites what an earlier one saw. Rows are buffered and written
         in batches; call flush() to force the remainder out.
+
+        Scrape parameters are not repeated here; they belong to the run and are
+        recorded once by start_scrape_run().
         """
         scraped_at = datetime.now(timezone.utc)
         self._ensure_partition(scraped_at)
         self._pending.append(
-            (
-                item_id,
-                Json(raw_json),
-                scraped_at,
-                zip_code,
-                radius_miles,
-                category,
-                sys_run_name,
-            )
+            (sys_run_name, item_id, category, Json(raw_json), scraped_at)
         )
         if len(self._pending) >= INSERT_BATCH_SIZE:
             self.flush()
@@ -176,21 +184,21 @@ class Database:
             execute_values(
                 cursor,
                 f"""
-                INSERT INTO {SCHEMA}.raw_auction_items
-                (item_id, raw_json, scraped_at, zip_code, radius_miles, category, sys_run_name)
+                INSERT INTO {SCHEMA}.{TABLE}
+                (sys_run_name, item_id, category, raw_json, scraped_at)
                 VALUES %s
                 """,
                 rows,
             )
         self.conn.commit()
-        logger.debug(f"Flushed {len(rows)} rows to {SCHEMA}.raw_auction_items")
+        logger.debug(f"Flushed {len(rows)} rows to {SCHEMA}.{TABLE}")
         return len(rows)
 
     def get_item(self, item_id: str) -> Optional[dict]:
         """Retrieve an item by ID."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(
-                f"SELECT * FROM {SCHEMA}.raw_auction_items WHERE item_id = %s", (item_id,)
+                f"SELECT * FROM {SCHEMA}.{TABLE} WHERE item_id = %s", (item_id,)
             )
             row = cursor.fetchone()
             if row:
@@ -202,7 +210,7 @@ class Database:
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(
                 f"""
-                SELECT * FROM {SCHEMA}.raw_auction_items
+                SELECT * FROM {SCHEMA}.{TABLE}
                 ORDER BY scraped_at DESC
                 LIMIT %s
                 """,
@@ -213,7 +221,7 @@ class Database:
     def get_item_count(self) -> int:
         """Get total number of items in database."""
         with self.conn.cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) FROM {SCHEMA}.raw_auction_items")
+            cursor.execute(f"SELECT COUNT(*) FROM {SCHEMA}.{TABLE}")
             return cursor.fetchone()[0]
 
     def get_run_stats(self, run_id: int) -> Optional[dict]:
