@@ -38,3 +38,54 @@ models:
         tests: [not_null, unique]
       - name: distance_km
         tests: [not_null]
+
+  - name: auction_schedule
+    description: >
+      Every discovered auction with a real distance and an absolute close time.
+      The orchestrator's selection query reads this: in-radius auctions closing
+      soon that have no completed scrape run yet.
+    columns:
+      - name: auction_id
+        tests: [not_null, unique]
+
+      - name: close_at
+        description: >
+          bid_close_local resolved to an instant as America/Toronto. Only
+          meaningful for rows where is_within_radius is true — see the model's
+          note on widening the radius.
+        tests: [not_null]
+
+      - name: is_within_radius
+        description: >
+          False for auctions outside the cutoff and for auctions whose postal
+          code did not geocode. Never null, so the orchestrator's filter can
+          never silently admit an unplaceable auction.
+        tests: [not_null]
+
+  - name: auction_manifest
+    description: >
+      The scrape ledger: every discovered auction and whether it has been
+      taken. The single written form of the rule that an auction is scraped
+      once — the orchestrator selects `scrape_state in ('pending','retry')`
+      rather than restating the condition, so the board and the scheduler
+      cannot disagree. A view, because state changes during a run.
+    columns:
+      - name: auction_id
+        tests: [not_null, unique]
+
+      - name: scrape_state
+        description: >
+          pending — in radius, still open, never attempted.
+          retry — attempted and not captured; the run failed, so it is still owed.
+          captured — a completed non-test run landed its catalogue.
+          missed — closed before it was ever captured. The number to watch.
+          out_of_radius — outside the cutoff or not geocodable; never scraped.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['pending', 'retry', 'captured', 'missed', 'out_of_radius']
+
+      - name: captured_lots
+        description: >
+          Lots landed by the capturing run. Compare against lot_count to see
+          how complete it was; the scraper refuses anything under 90%.

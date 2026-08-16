@@ -9,13 +9,10 @@ Apollo state cache in a <script id="hibid-state"> tag, which we parse
 to extract lot data.
 """
 
-import json
 import logging
-import re
 from typing import Iterator, Optional
 
-from bs4 import BeautifulSoup
-
+import apollo
 from config import Config
 from fetcher import PageFetcher, ScrapeStats
 
@@ -30,6 +27,10 @@ ITEMS_PER_PAGE = 100
 # How many times the end-of-results stub must repeat before it is believed.
 END_OF_RESULTS_CONFIRMATIONS = 3
 
+# How many times a catalogue page that came back short is re-fetched while the
+# auction's lot count says more are still due.
+SHORT_PAGE_RETRIES = 3
+
 
 class HiBidScraper(PageFetcher):
     """Scraper for HiBid auction listings."""
@@ -37,81 +38,86 @@ class HiBidScraper(PageFetcher):
     source = "hibid"
 
     def _build_url(self, category: Optional[str], page: int) -> str:
-        """Build HiBid search URL."""
-        # Base URL pattern for lots
-        if category:
-            url = f"{HIBID_BASE_URL}/lots/{category}/"
-        else:
-            url = f"{HIBID_BASE_URL}/lots/"
+        """
+        Build the URL for one page of lots.
 
-        # Query parameters
-        params = {
-            "status": "open",
-            "zip": self.config.zip_code,
-            "miles": str(self.config.radius_miles),
-            "apage": str(page),
-            "ipp": str(ITEMS_PER_PAGE),
-        }
+        Two modes, because they answer different questions:
+
+          * catalogue — every lot in one auction, open or closed. This is what
+            the orchestrator uses. It is the only way to see an auction whole:
+            a radius search drops lots the moment they close, so an auction
+            part-way through its staggered close reads as half its size.
+
+          * radius search — lots open right now within `miles` of a postal
+            code. Still the way to find lots without knowing the auction, but
+            it re-lists the same auctions every day and cannot be made complete.
+        """
+        if self.config.auction_id:
+            params = {
+                "apage": str(page),
+                "ipp": str(ITEMS_PER_PAGE),
+            }
+            url = f"{HIBID_BASE_URL}/catalog/{self.config.auction_id}"
+        else:
+            url = f"{HIBID_BASE_URL}/lots/{category}/" if category else f"{HIBID_BASE_URL}/lots/"
+            params = {
+                "status": "open",
+                "zip": self.config.zip_code,
+                "miles": str(self.config.radius_miles),
+                "apage": str(page),
+                "ipp": str(ITEMS_PER_PAGE),
+            }
 
         query_string = "&".join(f"{k}={v}" for k, v in params.items())
         return f"{url}?{query_string}"
 
-    @staticmethod
-    def is_end_of_results(html: str) -> bool:
+    def is_end_of_results(self, html: str) -> bool:
         """
-        Detect the stub HiBid serves for a page past the last one.
+        Whether there is genuinely nothing left to page through.
 
-        It answers ~183 bytes with no state script at all, which is what
-        separates a real end from a flaky render — those come back as a full
-        page carrying a state but no `lotSearch` node, and are worth retrying.
+        The radius search answers a page past its last with a ~183 byte stub.
+        A catalogue does not: it answers with a full site-chrome page carrying
+        an Apollo state but no `lotSearch` node, which is byte-for-byte the same
+        shape as a transient half-render.
+
+        Telling those apart in one request is not possible, so this does not
+        try — END_OF_RESULTS_CONFIRMATIONS repeats with a fresh browser each
+        time is what separates them, and a false end on page one still lands
+        zero lots, which scrape_source refuses to call a capture.
         """
-        return len(html) < 1000 and 'id="hibid-state"' not in html
+        if apollo.is_end_of_results(html):
+            return True
+        if self.config.auction_id:
+            return 'id="hibid-state"' in html and "lotSearch(" not in html
+        return False
 
-    @staticmethod
-    def is_incomplete(html: str) -> bool:
+    def is_incomplete(self, html: str) -> bool:
         """
         A page carrying an Apollo state but no search results is not finished.
 
-        HiBid often serves a state populated only with site chrome and no
-        `lotSearch` node. Those pages parse cleanly and yield zero lots, which
-        pagination would otherwise read as the end of the results.
+        Both modes render their lots through `lotSearch`, so that check covers
+        either.
+
+        A catalogue page needs a second one, because its lots carry no auction
+        of their own — the auction is the page, not a field — and lots that land
+        without one are dropped by silver as unplaceable. Usually a missing
+        auction node means a half-rendered page and retrying fixes it. Some
+        catalogues never render one at all, though, so the check only applies
+        when there is no discovered payload to fall back on; otherwise those
+        auctions would retry until they closed and be lost.
         """
-        # A populated state serialises as {"apollo.state":{"Lot:123":...}, so the
-        # opening brace-quote is what separates a real payload from an empty one.
-        return not (
-            'id="hibid-state"' in html
-            and '"apollo.state":{"' in html
-            and "lotSearch(" in html
-        )
+        if not apollo.has_rendered_query(html, "lotSearch"):
+            return True
+        if self.config.auction_id and not self.config.auction_payload:
+            return f'"Auction:{self.config.auction_id}"' not in html
+        return False
 
     def _extract_apollo_state(self, html: str) -> Optional[dict]:
-        """
-        Extract Apollo GraphQL state from HiBid's SSR response.
-
-        HiBid embeds the Apollo cache in <script id="hibid-state">.
-        """
-        try:
-            soup = BeautifulSoup(html, "html.parser")
-
-            # Find the hibid-state script tag
-            # `not state_script` would also be true for an empty tag, since a
-            # Tag's truthiness is its child count — test for None explicitly.
-            state_script = soup.find("script", {"id": "hibid-state"})
-            if state_script is None or not state_script.string:
-                logger.warning("No hibid-state script found in response")
-                return None
-
-            state_data = json.loads(state_script.string)
-            return state_data.get("apollo.state", {})
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Apollo state JSON: {e}")
+        """Extract the Apollo cache, counting a failure against the run."""
+        state = apollo.extract_state(html)
+        if state is None:
             self.stats.errors += 1
-            return None
-        except Exception as e:
-            logger.error(f"Error extracting Apollo state: {e}")
-            self.stats.errors += 1
-            return None
+        return state
 
     @staticmethod
     def _search_result_refs(apollo_state: dict) -> Optional[list[str]]:
@@ -123,17 +129,7 @@ class HiBidScraper(PageFetcher):
         id or location. Those are not search results and must not be mistaken
         for inventory in the requested radius.
         """
-        root = apollo_state.get("ROOT_QUERY", {})
-        for key, value in root.items():
-            if key.startswith("lotSearch") and isinstance(value, dict):
-                results = (value.get("pagedResults") or {}).get("results")
-                if isinstance(results, list):
-                    return [
-                        r["__ref"]
-                        for r in results
-                        if isinstance(r, dict) and "__ref" in r
-                    ]
-        return None
+        return apollo.paged_result_refs(apollo_state, "lotSearch")
 
     def _extract_lots_from_apollo(self, apollo_state: dict) -> list[dict]:
         """
@@ -176,6 +172,23 @@ class HiBidScraper(PageFetcher):
                     ref_key = auction_ref["__ref"]
                     if ref_key in auctions:
                         lot["_resolved_auction"] = auctions[ref_key]
+                elif self.config.auction_id:
+                    # A catalogue page states the auction once, at the top, and
+                    # leaves it off every lot — so attach the one the page is
+                    # for. Without this the lots land with no auction and silver
+                    # drops them for being unplaceable.
+                    #
+                    # The page's own copy is preferred where it exists: it is
+                    # fuller than anything else available, carrying buyerPremium,
+                    # bidIncrements and paymentInfo. Some catalogues render no
+                    # auction node at all, and for those the copy discovery
+                    # already fetched is what keeps the lots usable.
+                    resolved = (
+                        auctions.get(f"Auction:{self.config.auction_id}")
+                        or self.config.auction_payload
+                    )
+                    if resolved:
+                        lot["_resolved_auction"] = resolved
 
                 # Also resolve lotState reference if present
                 lot_state_ref = lot.get("lotState", {})
@@ -243,10 +256,13 @@ class HiBidScraper(PageFetcher):
         test_limit = self.config.test_limit if self.config.test_mode else float("inf")
         seen_ids = set()
 
-        logger.info(
-            f"Scraping category: {category or 'all'} "
-            f"(zip: {self.config.zip_code}, radius: {self.config.radius_miles} miles)"
-        )
+        if self.config.auction_id:
+            logger.info(f"Scraping catalogue for auction {self.config.auction_id}")
+        else:
+            logger.info(
+                f"Scraping category: {category or 'all'} "
+                f"(zip: {self.config.zip_code}, radius: {self.config.radius_miles} miles)"
+            )
 
         while total_items < test_limit:
             url = self._build_url(category, page)
@@ -273,6 +289,42 @@ class HiBidScraper(PageFetcher):
 
             lots = self._extract_lots_from_apollo(apollo_state)
             self.stats.pages_scraped += 1
+
+            # A page that rendered only part of its lots is indistinguishable
+            # from the last page: both come back short carrying a valid
+            # lotSearch node, so `is_incomplete` cannot separate them and the
+            # short-page rule below believes the wrong one. Observed live — a
+            # 310-lot catalogue whose first page rendered 10 lots was captured
+            # as 10 and reported success.
+            #
+            # The auction's own lot count is what breaks the tie. While more
+            # lots are still due, a short page is a first reading rather than
+            # the truth, and gets re-fetched with a fresh browser.
+            expected = self.config.auction_lot_count or 0
+            attempt = 0
+            while (
+                expected
+                and len(lots) < ITEMS_PER_PAGE
+                and total_items + len(lots) < expected
+                and attempt < SHORT_PAGE_RETRIES
+            ):
+                attempt += 1
+                logger.warning(
+                    f"Page {page} rendered {len(lots)} lots with "
+                    f"{expected - total_items} still due; re-fetching "
+                    f"({attempt}/{SHORT_PAGE_RETRIES})"
+                )
+                self._rotate_flaresolverr_session()
+                retry_html = self.fetch_page(url)
+                if not retry_html:
+                    break
+                retry_state = self._extract_apollo_state(retry_html)
+                if not retry_state:
+                    break
+                self.stats.pages_scraped += 1
+                retry_lots = self._extract_lots_from_apollo(retry_state)
+                if len(retry_lots) > len(lots):
+                    lots = retry_lots
 
             # Filter out lots we've already seen (duplicates across pages)
             new_lots = []
@@ -303,8 +355,13 @@ class HiBidScraper(PageFetcher):
                     logger.warning("Lot without ID, skipping")
                     self.stats.errors += 1
 
-            # Check if we got fewer lots than expected (end of results)
-            if len(lots) < ITEMS_PER_PAGE // 2:
+            # A page that came back short is the last one. A catalogue is exact
+            # about this — it returns a full page until it runs out — so the
+            # check can be too, which keeps the scrape from asking for a page
+            # past the end and paying three confirmation fetches to learn it.
+            # The radius search is looser, hence the wider margin there.
+            page_limit = ITEMS_PER_PAGE if self.config.auction_id else ITEMS_PER_PAGE // 2
+            if len(lots) < page_limit:
                 logger.info("Partial page received, likely end of results")
                 break
 

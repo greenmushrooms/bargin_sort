@@ -52,6 +52,47 @@ models:
               severity: warn
               values: ['CA', 'US']
 
+  - name: stg_hibid_auctions
+    description: >
+      One row per auction from the discovery feed, collapsed to its most recent
+      observation. Knows about auctions before any of their lots exist, which is
+      what the orchestrator schedules against.
+    columns:
+      - name: auction_id
+        tests: [not_null, unique]
+
+      - name: event_name
+        tests: [not_null]
+
+      - name: bid_close_local
+        description: >
+          Naive local time as HiBid states it. Resolved to an instant in
+          silver_enhanced, where the geocode says which timezone applies.
+        tests: [not_null]
+
+      - name: event_country_code
+        description: Derived from the postal code's shape; the seed only covers CA and US.
+        tests:
+          - accepted_values:
+              severity: warn
+              values: ['CA', 'US']
+
+      - name: auction_status
+        description: >
+          Where the auction is in its lifecycle. POSTED and NO_CATALOG_YET are
+          not yet taking bids, so their lot counts are projections rather than
+          inventory. Warns rather than fails, so a new HiBid status surfaces
+          without stopping the pipeline.
+        tests:
+          - accepted_values:
+              severity: warn
+              values:
+                - OPEN_ABSENTEE
+                - OPEN_LIVE_CATALOG
+                - POSTED
+                - NO_CATALOG_YET
+                - CLOSED
+
   - name: stg_police_lots
     description: >
       One row per listing per completed scrape of Police Auctions Canada. A

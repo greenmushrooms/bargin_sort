@@ -6,6 +6,8 @@ Loads settings from environment variables or .env file.
 
 import os
 from dataclasses import dataclass
+from typing import Optional
+
 from dotenv import load_dotenv
 
 # Load .env file if present
@@ -19,9 +21,41 @@ class Config:
     # Required
     zip_code: str
 
-    # Search parameters
-    radius_miles: int = 50
+    # Search parameters.
+    #
+    # HiBid's radius is whole miles, and the pipeline's question is "within
+    # 50 km of home" — 31 mi is 49.9 km, the closest it can be asked. HiBid
+    # honours it loosely (a ~60 km Hamilton auction still comes back) and
+    # publishes no distance of its own, so the exact cutoff is applied in
+    # silver_enhanced against postal centroids. Ask narrow, filter exactly.
+    radius_miles: int = 31
     search_categories: list[str] = None
+
+    # Scope a lot scrape to one auction's catalogue instead of a radius search.
+    # Empty means radius search.
+    auction_id: str = ""
+
+    # The auction as discovery saw it, inlined onto each lot when the catalogue
+    # page does not carry one of its own.
+    #
+    # Catalogue pages state the auction once at the top rather than on every
+    # lot, and some omit it entirely — those lots would land unplaceable and be
+    # dropped by silver. Discovery has already fetched every auction it
+    # schedules, so the copy is free. The page's own copy still wins when it
+    # exists: it carries buyerPremium, bidIncrements and paymentInfo, which the
+    # discovery feed does not return.
+    auction_payload: Optional[dict] = None
+
+    # How many lots discovery said this auction holds.
+    #
+    # The only independent check on whether a catalogue was captured whole. A
+    # truncated page and a last page look identical, so without a count to
+    # compare against, a partial scrape reports success. Approximate — sellers
+    # pull lots — so it decides "materially short", never exact equality.
+    auction_lot_count: Optional[int] = None
+
+    # How far ahead auction discovery pages before it stops.
+    discovery_horizon_days: int = 14
 
     # Mode settings
     test_mode: bool = False
@@ -69,8 +103,10 @@ class Config:
 
         return cls(
             zip_code=zip_code,
-            radius_miles=int(os.getenv("RADIUS_MILES", "50")),
+            radius_miles=int(os.getenv("RADIUS_MILES", "31")),
             search_categories=categories,
+            auction_id=os.getenv("AUCTION_ID", "").strip(),
+            discovery_horizon_days=int(os.getenv("DISCOVERY_HORIZON_DAYS", "14")),
             test_mode=os.getenv("TEST_MODE", "false").lower() == "true",
             test_limit=int(os.getenv("TEST_LIMIT", "20")),
             db_host=os.getenv("DB_HOST", "localhost"),

@@ -8,18 +8,86 @@ pull:
       directory: /opt/prefect
 
 deployments:
-  - name: bargin-sort-deployment
-    entrypoint: main.py:scrape_auctions
+  - name: auction-discovery-deployment
+    entrypoint: main.py:discover_auctions
     # Timezone is explicit: Prefect cron is UTC by default, which would drift
     # an hour against local auction closing times twice a year.
+    #
+    # Evening, and ahead of the sweep it feeds: an auction picked up now has had
+    # its full previous day of bidding, so the one observation it gets is worth
+    # more than a 5am one taken nine hours before anyone bids.
     schedules:
-      - cron: "0 5 * * *"
+      - cron: "0 17 * * *"
         timezone: "America/Toronto"
-    # Stated rather than left to the function defaults, so the schedule says
-    # plainly what the nightly run does.
     parameters:
       zip_code: "m8w3b7"
-      radius_miles: 50
+      # 31 mi = 49.9 km. HiBid's radius is whole miles and it honours the
+      # figure loosely, so auction_schedule applies the exact 50 km cutoff.
+      radius_miles: 31
+      horizon_days: 14
+      test_mode: false
+      build_downstream: true
+    work_pool:
+      name: dev-pool-docker
+      job_variables:
+        image: integration-bargin-sort:latest
+        networks:
+          - project-hub-network
+        env:
+          PREFECT_LOGGING_EXTRA_LOGGERS: "scraper,auction_discovery,apollo,database,transform,main,maintenance"
+          FLARESOLVERR_URL: "http://flaresolverr:8191/v1"
+          DB_HOST: "{{ prefect.blocks.secret.bargin-sort--database-host }}"
+          DB_PORT: "{{ prefect.blocks.secret.bargin-sort--database-port }}"
+          DB_USER: "{{ prefect.blocks.secret.bargin-sort--database-user }}"
+          DB_PASSWORD: "{{ prefect.blocks.secret.bargin-sort--database-password }}"
+          DB_NAME: "{{ prefect.blocks.secret.bargin-sort--database-name }}"
+
+  - name: closing-auctions-deployment
+    entrypoint: main.py:scrape_closing_auctions
+    # 30 minutes behind discovery, whose auction_schedule this reads.
+    schedules:
+      - cron: "30 17 * * *"
+        timezone: "America/Toronto"
+    parameters:
+      # Not a search parameter here — the catalogue is already the scope — but
+      # the origin every lot's distance is measured from.
+      zip_code: "m8w3b7"
+      # Two days, not one, so every auction falls inside two consecutive
+      # windows and is captured on the first. Daily windows tile exactly, which
+      # sounds sufficient until a run is missed and takes a whole day's
+      # auctions with it. The cost of the overlap is capturing ~a day earlier,
+      # and dedup means it is still scraped exactly once.
+      days_ahead: 2
+      max_km: 50.0
+      test_mode: false
+      build_downstream: true
+    work_pool:
+      name: dev-pool-docker
+      job_variables:
+        image: integration-bargin-sort:latest
+        networks:
+          - project-hub-network
+        env:
+          PREFECT_LOGGING_EXTRA_LOGGERS: "scraper,auction_discovery,apollo,database,transform,main,maintenance"
+          FLARESOLVERR_URL: "http://flaresolverr:8191/v1"
+          DB_HOST: "{{ prefect.blocks.secret.bargin-sort--database-host }}"
+          DB_PORT: "{{ prefect.blocks.secret.bargin-sort--database-port }}"
+          DB_USER: "{{ prefect.blocks.secret.bargin-sort--database-user }}"
+          DB_PASSWORD: "{{ prefect.blocks.secret.bargin-sort--database-password }}"
+          DB_NAME: "{{ prefect.blocks.secret.bargin-sort--database-name }}"
+
+  - name: bargin-sort-deployment
+    entrypoint: main.py:scrape_auctions
+    # Deliberately unscheduled. The radius sweep re-read every auction on every
+    # one of the ~4 days it stayed open, and still could not see an auction
+    # whole — an open-status search drops lots as they close, so auctions
+    # mid-close came back partial and several large local ones never appeared at
+    # all. discover_auctions + scrape_closing_auctions replace it on the
+    # schedule; this stays deployable for ad-hoc searches.
+    schedules: []
+    parameters:
+      zip_code: "m8w3b7"
+      radius_miles: 31
       test_mode: false
       build_downstream: true
     work_pool:
@@ -45,9 +113,9 @@ deployments:
 
   - name: police-auctions-deployment
     entrypoint: main.py:scrape_police_auctions
-    # 30 minutes behind HiBid, which takes ~12 minutes for a full 50 mile
-    # sweep. Overlapping them would put both through one FlareSolverr and have
-    # two dbt runs racing for the same silver tables.
+    # Morning, well clear of the evening HiBid pair. Overlapping them would put
+    # both through one FlareSolverr and have two dbt runs racing for the same
+    # silver tables.
     schedules:
       - cron: "30 5 * * *"
         timezone: "America/Toronto"

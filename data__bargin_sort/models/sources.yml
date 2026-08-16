@@ -24,6 +24,25 @@ sources:
             description: Prefect flow run name; the incremental watermark.
             tests: [not_null]
 
+      - name: hibid_auctions
+        description: >
+          One row per auction per discovery pass of hibid.com/auctions. The
+          orchestrator's work queue: it carries close times and lot counts for
+          auctions whose lots have not been scraped yet, which is what lets each
+          auction be visited exactly once, shortly before it closes.
+        columns:
+          - name: item_id
+            description: HiBid auction id. Not unique — one row per observation.
+            tests: [not_null]
+          - name: raw_json
+            description: Complete Apollo `Auction` object as the discovery feed returned it.
+            tests: [not_null]
+          - name: scraped_at
+            description: Partition key.
+            tests: [not_null]
+          - name: sys_run_name
+            tests: [not_null]
+
       - name: police_auctions
         description: One row per listing per scrape of policeauctionscanada.com.
         columns:

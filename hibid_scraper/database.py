@@ -32,7 +32,11 @@ DEFAULT_SOURCE = "hibid"
 
 SQL_DIR = Path(__file__).parent / "sql"
 # Applied on connect: the shared schema first, then each source's table.
-DDL_FILES = ("003_raw_schema.sql", "005_police_auctions.sql")
+DDL_FILES = (
+    "003_raw_schema.sql",
+    "005_police_auctions.sql",
+    "006_hibid_auctions.sql",
+)
 
 # Rows buffered before a write. A full scrape is ~30k rows and committing each
 # one separately dominates the runtime.
@@ -103,14 +107,28 @@ class Database:
         self._ensured_months.add(month_key)
         logger.info(f"Raw partition ready: {partition}")
 
-    def start_scrape_run(self, zip_code: str, radius_miles: int, test_mode: bool, sys_run_name: str = "") -> int:
-        """Record the start of a scrape run. Returns run ID."""
+    def start_scrape_run(
+        self,
+        zip_code: str,
+        radius_miles: int,
+        test_mode: bool,
+        sys_run_name: str = "",
+        auction_id: Optional[int] = None,
+    ) -> int:
+        """
+        Record the start of a scrape run. Returns run ID.
+
+        `auction_id` is what makes "scrape each auction once" enforceable: a
+        completed run carrying one is the orchestrator's proof that auction has
+        been captured. NULL for radius sweeps and discovery passes.
+        """
         with self.conn.cursor() as cursor:
             cursor.execute(
                 f"""
                 INSERT INTO {SCHEMA}.scrape_runs
-                (source, sys_run_name, started_at, zip_code, radius_miles, test_mode)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                (source, sys_run_name, started_at, zip_code, radius_miles,
+                 test_mode, auction_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -120,6 +138,7 @@ class Database:
                     zip_code,
                     radius_miles,
                     test_mode,
+                    auction_id,
                 ),
             )
             run_id = cursor.fetchone()[0]
