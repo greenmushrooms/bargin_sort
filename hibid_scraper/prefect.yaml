@@ -10,6 +10,18 @@ pull:
 deployments:
   - name: bargin-sort-deployment
     entrypoint: main.py:scrape_auctions
+    # Timezone is explicit: Prefect cron is UTC by default, which would drift
+    # an hour against local auction closing times twice a year.
+    schedules:
+      - cron: "0 5 * * *"
+        timezone: "America/Toronto"
+    # Stated rather than left to the function defaults, so the schedule says
+    # plainly what the nightly run does.
+    parameters:
+      zip_code: "m8w3b7"
+      radius_miles: 50
+      test_mode: false
+      build_downstream: true
     work_pool:
       name: dev-pool-docker
       job_variables:
@@ -33,6 +45,15 @@ deployments:
 
   - name: police-auctions-deployment
     entrypoint: main.py:scrape_police_auctions
+    # 30 minutes behind HiBid, which takes ~12 minutes for a full 50 mile
+    # sweep. Overlapping them would put both through one FlareSolverr and have
+    # two dbt runs racing for the same silver tables.
+    schedules:
+      - cron: "30 5 * * *"
+        timezone: "America/Toronto"
+    parameters:
+      test_mode: false
+      build_downstream: true
     work_pool:
       name: dev-pool-docker
       job_variables:
@@ -56,8 +77,13 @@ deployments:
 
   - name: raw-retention
     entrypoint: maintenance.py:raw_retention
-    schedule:
-      cron: "0 4 1 * *"   # 04:00 on the 1st, just after a new month's partition opens
+    # Daily rather than monthly. Dropping is a no-op on all but the first day
+    # of a month, and running it every day means a month ageing out is removed
+    # promptly instead of sitting around until the next monthly tick. Runs
+    # before the scrapes so it never competes with a write-heavy load.
+    schedules:
+      - cron: "30 3 * * *"
+        timezone: "America/Toronto"
     parameters:
       months: 6
       dry_run: false
