@@ -57,9 +57,11 @@ class Config:
     def from_env(cls) -> "Config":
         """Load configuration from environment variables."""
 
-        zip_code = os.getenv("ZIP_CODE")
-        if not zip_code:
-            raise ValueError("ZIP_CODE environment variable is required")
+        # Not required here: the flow always overwrites it from its own
+        # `zip_code` parameter, so demanding it from the environment only made
+        # a deployment crash before it ever reached the scrape. Validated at
+        # the point of use instead, in scrape_hibid().
+        zip_code = os.getenv("ZIP_CODE", "")
 
         # Parse search categories
         categories_str = os.getenv("SEARCH_CATEGORIES", "")

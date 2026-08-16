@@ -32,6 +32,11 @@ def scrape_hibid(config: Config, sys_run_name: str) -> dict:
     """Scrape HiBid auctions and store results in the database."""
     logger = logging.getLogger(__name__)
 
+    if not config.zip_code:
+        raise ValueError(
+            "zip_code is required — pass it as a flow parameter or set ZIP_CODE"
+        )
+
     db = Database(config)
     scraper = HiBidScraper(config)
 
