@@ -50,7 +50,14 @@ joined as (
         l.lot_number,
         l.title,
         l.description,
-        l.current_bid,
+        l.high_bid,
+        l.min_bid,
+        l.buy_now,
+        l.bid_count,
+        l.lot_status,
+        l.is_closed,
+        l.time_left,
+        l.time_left_seconds,
         l.bid_quantity,
         l.quantity,
         l.estimate_text,
@@ -88,6 +95,11 @@ joined as (
 
 select
     *,
+
+    -- HiBid exposes no canonical lot URL in the payload, but /lot/<id>
+    -- resolves to the lot page (verified against live lots).
+    'https://hibid.com/lot/' || lot_id                as lot_url,
+
     case
         when origin_latitude is not null and event_latitude is not null
         then round(

@@ -63,7 +63,19 @@ renamed as (
         raw_json ->> 'lead'                             as title,
         raw_json ->> 'description'                      as description,
 
-        nullif(raw_json ->> 'bidAmount', '')::numeric   as current_bid,
+        -- `bidAmount` on the Lot object is a fixed 123.45 placeholder on both
+        -- the search endpoint and the lot page. The live figures are on the
+        -- inline lotState, which is what anything price-related must use.
+        nullif(raw_json -> 'lotState' ->> 'highBid', '')::numeric  as high_bid,
+        nullif(raw_json -> 'lotState' ->> 'minBid', '')::numeric   as min_bid,
+        nullif(raw_json -> 'lotState' ->> 'buyNow', '')::numeric   as buy_now,
+        nullif(raw_json -> 'lotState' ->> 'bidCount', '')::int     as bid_count,
+        raw_json -> 'lotState' ->> 'status'                        as lot_status,
+        (raw_json -> 'lotState' ->> 'isClosed')::boolean           as is_closed,
+        raw_json -> 'lotState' ->> 'timeLeft'                      as time_left,
+        nullif(raw_json -> 'lotState' ->> 'timeLeftSeconds', '')::numeric
+                                                                   as time_left_seconds,
+
         nullif(raw_json ->> 'bidQuantity', '')::int     as bid_quantity,
         nullif(raw_json ->> 'quantity', '')::int        as quantity,
         raw_json ->> 'estimate'                         as estimate_text,
