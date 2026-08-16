@@ -1,331 +1,226 @@
 """
 Database management for HiBid Scraper.
 
-Stores raw JSON payloads in SQLite (PostgreSQL-compatible schema).
+Writes the bronze layer of the medallion: raw JSONB payloads, append-only, one
+row per lot per scrape. Nothing here updates or deletes, so silver and
+silver_enhanced can always be rebuilt by replaying this table.
+
+Schema: bronze (see sql/001_bronze.sql)
+Tables: raw_auction_items (monthly partitions), scrape_runs
 """
 
-import json
 import logging
-import sqlite3
 from datetime import datetime, timezone
-from typing import Optional, Any
+from pathlib import Path
+from typing import Optional
+
+import psycopg2
+from psycopg2.extras import RealDictCursor, Json, execute_values
 
 from config import Config
 
 logger = logging.getLogger(__name__)
 
+SCHEMA = "bronze"
 
-# =============================================================================
-# DATABASE BACKEND SWAP INSTRUCTIONS
-# =============================================================================
-# To switch from SQLite to PostgreSQL:
-#
-# 1. Install psycopg2: uv add psycopg2-binary
-#    Or: uv sync --extra postgres
-#
-# 2. Update DATABASE_URL in .env:
-#    DATABASE_URL=postgresql://user:password@localhost:5432/hibid_auctions
-#
-# 3. Replace the Database class below with PostgresDatabase class
-#    (uncomment the PostgreSQL implementation at the bottom of this file)
-#
-# 4. The schema is already PostgreSQL-compatible:
-#    - Uses TEXT for JSON (JSONB in PostgreSQL for better performance)
-#    - Uses INTEGER PRIMARY KEY (SERIAL in PostgreSQL)
-#    - Index syntax is compatible
-# =============================================================================
+DDL_PATH = Path(__file__).parent / "sql" / "001_bronze.sql"
+
+# Rows buffered before a write. A full scrape is ~30k rows and committing each
+# one separately dominates the runtime.
+INSERT_BATCH_SIZE = 500
 
 
 class Database:
-    """SQLite database handler for storing raw auction JSON payloads."""
+    """PostgreSQL database handler for storing raw auction JSON payloads."""
 
     def __init__(self, config: Config):
         self.config = config
-        self.db_path = config.get_sqlite_path()
-        self.conn: Optional[sqlite3.Connection] = None
+        self.conn = None
+        self._pending: list[tuple] = []
+        self._ensured_months: set[str] = set()
 
     def connect(self) -> None:
         """Establish database connection."""
-        logger.info(f"Connecting to SQLite database: {self.db_path}")
-        self.conn = sqlite3.connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row
+        logger.info("Connecting to PostgreSQL database")
+        self.conn = psycopg2.connect(
+            host=self.config.db_host,
+            port=self.config.db_port,
+            user=self.config.db_user,
+            password=self.config.db_password,
+            dbname=self.config.db_name,
+        )
         self._init_schema()
 
     def close(self) -> None:
-        """Close database connection."""
+        """Close database connection, writing out anything still buffered."""
         if self.conn:
+            try:
+                self.flush()
+            except psycopg2.Error as e:
+                logger.error(f"Could not flush buffered rows on close: {e}")
             self.conn.close()
             self.conn = None
             logger.info("Database connection closed")
 
     def _init_schema(self) -> None:
-        """Initialize database schema."""
-        cursor = self.conn.cursor()
+        """
+        Apply the bronze DDL and make sure this month's partition exists.
 
-        # Main table for raw auction item payloads
-        # Schema designed for PostgreSQL compatibility:
-        # - item_id: Use VARCHAR in PostgreSQL (TEXT works in both)
-        # - raw_json: Use JSONB in PostgreSQL for indexing/querying
-        # - timestamps: Use TIMESTAMP WITH TIME ZONE in PostgreSQL
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS auction_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                item_id TEXT NOT NULL UNIQUE,
-                raw_json TEXT NOT NULL,
-                scraped_at TEXT NOT NULL,
-                zip_code TEXT NOT NULL,
-                radius_miles INTEGER NOT NULL,
-                category TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        # Indexes for common queries
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_item_id ON auction_items(item_id)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_scraped_at ON auction_items(scraped_at)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_zip_code ON auction_items(zip_code)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_category ON auction_items(category)
-        """)
-
-        # Table to track scrape runs for auditing
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS scrape_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                started_at TEXT NOT NULL,
-                completed_at TEXT,
-                zip_code TEXT NOT NULL,
-                radius_miles INTEGER NOT NULL,
-                test_mode INTEGER NOT NULL,
-                items_found INTEGER DEFAULT 0,
-                items_added INTEGER DEFAULT 0,
-                items_updated INTEGER DEFAULT 0,
-                errors INTEGER DEFAULT 0,
-                status TEXT DEFAULT 'running'
-            )
-        """)
-
+        The DDL lives in sql/001_bronze.sql so the schema has a single
+        definition that can also be applied by hand or from a migration runner.
+        """
+        ddl = DDL_PATH.read_text()
+        with self.conn.cursor() as cursor:
+            cursor.execute(ddl)
         self.conn.commit()
-        logger.info("Database schema initialized")
+        logger.info("Bronze schema initialized")
+        self._ensure_partition(datetime.now(timezone.utc))
 
-    def start_scrape_run(self, zip_code: str, radius_miles: int, test_mode: bool) -> int:
+    def _ensure_partition(self, when: datetime) -> None:
+        """Create the monthly partition covering `when`, once per month seen."""
+        month_key = when.strftime("%Y-%m")
+        if month_key in self._ensured_months:
+            return
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                f"SELECT {SCHEMA}.ensure_month_partition(%s)", (when.date(),)
+            )
+            partition = cursor.fetchone()[0]
+        self.conn.commit()
+        self._ensured_months.add(month_key)
+        logger.info(f"Bronze partition ready: {partition}")
+
+    def start_scrape_run(self, zip_code: str, radius_miles: int, test_mode: bool, sys_run_name: str = "") -> int:
         """Record the start of a scrape run. Returns run ID."""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO scrape_runs (started_at, zip_code, radius_miles, test_mode)
-            VALUES (?, ?, ?, ?)
-            """,
-            (datetime.now(timezone.utc).isoformat(), zip_code, radius_miles, int(test_mode)),
-        )
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                INSERT INTO {SCHEMA}.scrape_runs (started_at, zip_code, radius_miles, test_mode, sys_run_name)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (datetime.now(timezone.utc), zip_code, radius_miles, test_mode, sys_run_name),
+            )
+            run_id = cursor.fetchone()[0]
         self.conn.commit()
-        return cursor.lastrowid
+        return run_id
 
     def complete_scrape_run(
         self,
         run_id: int,
         items_found: int,
-        items_added: int,
-        items_updated: int,
+        items_inserted: int,
         errors: int,
         status: str = "completed",
     ) -> None:
         """Record the completion of a scrape run."""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """
-            UPDATE scrape_runs
-            SET completed_at = ?, items_found = ?, items_added = ?,
-                items_updated = ?, errors = ?, status = ?
-            WHERE id = ?
-            """,
-            (
-                datetime.now(timezone.utc).isoformat(),
-                items_found,
-                items_added,
-                items_updated,
-                errors,
-                status,
-                run_id,
-            ),
-        )
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                UPDATE {SCHEMA}.scrape_runs
+                SET completed_at = %s, items_found = %s, items_inserted = %s,
+                    errors = %s, status = %s
+                WHERE id = %s
+                """,
+                (
+                    datetime.now(timezone.utc),
+                    items_found,
+                    items_inserted,
+                    errors,
+                    status,
+                    run_id,
+                ),
+            )
         self.conn.commit()
 
-    def upsert_item(
+    def insert_item(
         self,
         item_id: str,
         raw_json: dict,
         zip_code: str,
         radius_miles: int,
         category: Optional[str] = None,
-    ) -> tuple[bool, bool]:
+        sys_run_name: str = "",
+    ) -> None:
         """
-        Insert or update an auction item.
+        Queue a raw auction item for insertion.
 
-        Returns: (is_new, is_updated) tuple
+        No dedup — bronze keeps every observation of every lot, so a later run
+        never overwrites what an earlier one saw. Rows are buffered and written
+        in batches; call flush() to force the remainder out.
         """
-        cursor = self.conn.cursor()
-        scraped_at = datetime.now(timezone.utc).isoformat()
-        json_str = json.dumps(raw_json)
-
-        # Check if item exists
-        cursor.execute("SELECT id, raw_json FROM auction_items WHERE item_id = ?", (item_id,))
-        existing = cursor.fetchone()
-
-        if existing:
-            # Update if JSON changed
-            if existing["raw_json"] != json_str:
-                cursor.execute(
-                    """
-                    UPDATE auction_items
-                    SET raw_json = ?, scraped_at = ?, zip_code = ?,
-                        radius_miles = ?, category = ?
-                    WHERE item_id = ?
-                    """,
-                    (json_str, scraped_at, zip_code, radius_miles, category, item_id),
-                )
-                self.conn.commit()
-                return (False, True)  # Not new, but updated
-            return (False, False)  # Not new, not updated
-        else:
-            # Insert new item
-            cursor.execute(
-                """
-                INSERT INTO auction_items
-                (item_id, raw_json, scraped_at, zip_code, radius_miles, category)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (item_id, json_str, scraped_at, zip_code, radius_miles, category),
+        scraped_at = datetime.now(timezone.utc)
+        self._ensure_partition(scraped_at)
+        self._pending.append(
+            (
+                item_id,
+                Json(raw_json),
+                scraped_at,
+                zip_code,
+                radius_miles,
+                category,
+                sys_run_name,
             )
-            self.conn.commit()
-            return (True, False)  # New item
+        )
+        if len(self._pending) >= INSERT_BATCH_SIZE:
+            self.flush()
+
+    def flush(self) -> int:
+        """Write any buffered rows. Returns how many were written."""
+        if not self._pending:
+            return 0
+
+        rows = self._pending
+        self._pending = []
+        with self.conn.cursor() as cursor:
+            execute_values(
+                cursor,
+                f"""
+                INSERT INTO {SCHEMA}.raw_auction_items
+                (item_id, raw_json, scraped_at, zip_code, radius_miles, category, sys_run_name)
+                VALUES %s
+                """,
+                rows,
+            )
+        self.conn.commit()
+        logger.debug(f"Flushed {len(rows)} rows to {SCHEMA}.raw_auction_items")
+        return len(rows)
 
     def get_item(self, item_id: str) -> Optional[dict]:
         """Retrieve an item by ID."""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT * FROM auction_items WHERE item_id = ?", (item_id,)
-        )
-        row = cursor.fetchone()
-        if row:
-            return dict(row)
-        return None
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                f"SELECT * FROM {SCHEMA}.raw_auction_items WHERE item_id = %s", (item_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
 
     def get_recent_items(self, limit: int = 100) -> list[dict]:
         """Get most recently scraped items."""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """
-            SELECT * FROM auction_items
-            ORDER BY scraped_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                f"""
+                SELECT * FROM {SCHEMA}.raw_auction_items
+                ORDER BY scraped_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     def get_item_count(self) -> int:
         """Get total number of items in database."""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT COUNT(*) as count FROM auction_items")
-        return cursor.fetchone()["count"]
+        with self.conn.cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) FROM {SCHEMA}.raw_auction_items")
+            return cursor.fetchone()[0]
 
     def get_run_stats(self, run_id: int) -> Optional[dict]:
         """Get statistics for a scrape run."""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM scrape_runs WHERE id = ?", (run_id,))
-        row = cursor.fetchone()
-        if row:
-            return dict(row)
-        return None
-
-
-# =============================================================================
-# POSTGRESQL IMPLEMENTATION (uncomment when ready to switch)
-# =============================================================================
-#
-# import psycopg2
-# from psycopg2.extras import RealDictCursor, Json
-#
-# class PostgresDatabase:
-#     """PostgreSQL database handler for storing raw auction JSON payloads."""
-#
-#     def __init__(self, config: Config):
-#         self.config = config
-#         self.conn = None
-#
-#     def connect(self) -> None:
-#         """Establish database connection."""
-#         logger.info(f"Connecting to PostgreSQL database")
-#         self.conn = psycopg2.connect(self.config.database_url)
-#         self._init_schema()
-#
-#     def close(self) -> None:
-#         """Close database connection."""
-#         if self.conn:
-#             self.conn.close()
-#             self.conn = None
-#             logger.info("Database connection closed")
-#
-#     def _init_schema(self) -> None:
-#         """Initialize database schema."""
-#         with self.conn.cursor() as cursor:
-#             cursor.execute("""
-#                 CREATE TABLE IF NOT EXISTS auction_items (
-#                     id SERIAL PRIMARY KEY,
-#                     item_id VARCHAR(255) NOT NULL UNIQUE,
-#                     raw_json JSONB NOT NULL,
-#                     scraped_at TIMESTAMP WITH TIME ZONE NOT NULL,
-#                     zip_code VARCHAR(10) NOT NULL,
-#                     radius_miles INTEGER NOT NULL,
-#                     category VARCHAR(255),
-#                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-#                 )
-#             """)
-#             cursor.execute("""
-#                 CREATE INDEX IF NOT EXISTS idx_item_id ON auction_items(item_id)
-#             """)
-#             cursor.execute("""
-#                 CREATE INDEX IF NOT EXISTS idx_scraped_at ON auction_items(scraped_at)
-#             """)
-#             cursor.execute("""
-#                 CREATE INDEX IF NOT EXISTS idx_zip_code ON auction_items(zip_code)
-#             """)
-#             cursor.execute("""
-#                 CREATE INDEX IF NOT EXISTS idx_category ON auction_items(category)
-#             """)
-#             # PostgreSQL-specific: GIN index for JSONB queries
-#             cursor.execute("""
-#                 CREATE INDEX IF NOT EXISTS idx_raw_json_gin
-#                 ON auction_items USING GIN (raw_json)
-#             """)
-#
-#             cursor.execute("""
-#                 CREATE TABLE IF NOT EXISTS scrape_runs (
-#                     id SERIAL PRIMARY KEY,
-#                     started_at TIMESTAMP WITH TIME ZONE NOT NULL,
-#                     completed_at TIMESTAMP WITH TIME ZONE,
-#                     zip_code VARCHAR(10) NOT NULL,
-#                     radius_miles INTEGER NOT NULL,
-#                     test_mode BOOLEAN NOT NULL,
-#                     items_found INTEGER DEFAULT 0,
-#                     items_added INTEGER DEFAULT 0,
-#                     items_updated INTEGER DEFAULT 0,
-#                     errors INTEGER DEFAULT 0,
-#                     status VARCHAR(50) DEFAULT 'running'
-#                 )
-#             """)
-#         self.conn.commit()
-#         logger.info("Database schema initialized")
-#
-#     # ... (implement remaining methods with psycopg2 syntax)
-#     # Key differences from SQLite:
-#     # - Use %s instead of ? for placeholders
-#     # - Use Json() wrapper for JSONB columns
-#     # - Use RealDictCursor for dict-like row access
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(f"SELECT * FROM {SCHEMA}.scrape_runs WHERE id = %s", (run_id,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None

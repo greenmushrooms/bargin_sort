@@ -1,6 +1,6 @@
 # HiBid Auction Scraper
 
-Scrapes auction items from HiBid based on zip code and radius, storing raw JSON payloads in SQLite (PostgreSQL-compatible).
+Scrapes auction items from HiBid based on zip code and radius, storing raw JSON payloads in PostgreSQL (schema `hibid`, JSONB).
 
 Adapted from [texas_auctions_scraper](https://github.com/jkoelmel/texas_auctions_scraper).
 
@@ -8,11 +8,65 @@ Adapted from [texas_auctions_scraper](https://github.com/jkoelmel/texas_auctions
 
 - Location-based search by zip code and radius
 - Stores complete raw JSON payloads (no data filtering)
-- SQLite storage with easy PostgreSQL migration path
+- PostgreSQL storage using JSONB
 - Test mode for development
 - Respectful rate limiting (2-5 second delays)
 - Retry logic for failed requests
 - Run tracking and statistics
+
+## Pipeline
+
+`scrape_auctions` does two things: scrapes HiBid into `bronze`, then runs dbt to
+rebuild `silver` and `silver_enhanced`.
+
+The dbt step is scoped to the run that just finished
+(`--vars '{target_run: <sys_run_name>}'`), so its cost tracks the new data
+rather than everything bronze holds. Because the incremental strategy is
+`delete+insert` on `sys_run_name`, re-running a job id replaces its slice
+instead of duplicating it.
+
+Bronze is durable before dbt starts, so a transform failure never costs the
+scrape — re-run dbt alone to recover. Pass `build_downstream=False` to skip it.
+
+```bash
+# Scrape and transform
+python main.py
+
+# Transform only, for a specific run
+cd ../data__bargin_sort
+dbt run --profiles-dir . --vars '{target_run: carmine-salmon}'
+
+# Rebuild everything from bronze
+dbt run --full-refresh --profiles-dir .
+```
+
+Build the image from the **repository root** so it includes the dbt project:
+
+```bash
+docker build -f hibid_scraper/Dockerfile -t integration-bargin-sort .
+```
+
+## Cloudflare and FlareSolverr
+
+HiBid sits behind Cloudflare, which intermittently answers plain HTTP clients
+with `403 Attention Required` depending on the caller's IP reputation. The
+scraper therefore fetches directly first, and on the first 403 switches to a
+[FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) instance —
+a real browser that solves the challenge — for the remainder of the run.
+
+Set the endpoint with `FLARESOLVERR_URL`. Leaving it empty disables the
+fallback, so a blocked run simply fails.
+
+While the fallback is active the scraper opens one FlareSolverr browser session
+and reuses it across pages, destroying it on exit. HiBid sometimes serves a page
+before its Apollo state has rendered, most often on a session's first request;
+those responses are detected and retried.
+
+Running in Docker, FlareSolverr must share a network with the scraper:
+
+```bash
+docker network connect project-hub-network flaresolverr
+```
 
 ## Installation
 

@@ -1,0 +1,19 @@
+# Local virtualenvs — the image installs its own dependencies.
+**/.venv/
+**/venv/
+
+# dbt build artifacts, regenerated inside the container.
+**/target/
+**/dbt_packages/
+**/logs/
+
+**/__pycache__/
+**/*.py[cod]
+
+# Secrets and local-only state.
+**/.env
+**/*.db
+**/*.log
+
+.git/
+.claude/

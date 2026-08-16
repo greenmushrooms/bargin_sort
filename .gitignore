@@ -58,3 +58,6 @@ logs/
 
 # Prefect
 .prefectignore
+
+# dbt local user id
+.user.yml

@@ -1,0 +1,40 @@
+name: 'data__bargin_sort'
+version: '1.0.0'
+profile: 'data__bargin_sort'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  data__bargin_sort:
+    # Silver: bronze JSONB flattened into typed columns, deduplicated to one
+    # row per lot per run. Tables rather than views because silver_enhanced
+    # joins across them and the JSONB extraction is not cheap to repeat.
+    silver:
+      +schema: silver
+      +materialized: table
+    # Silver enhanced: silver plus derived attributes that need a join to
+    # reference data (postal centroids today, Claude evals later).
+    silver_enhanced:
+      +schema: silver_enhanced
+      +materialized: table
+
+seeds:
+  data__bargin_sort:
+    +schema: reference
+    postal_centroids:
+      +column_types:
+        country_code: varchar(2)
+        postal_code: varchar(10)
+        place_name: varchar(180)
+        admin1_code: varchar(100)
+        latitude: double precision
+        longitude: double precision

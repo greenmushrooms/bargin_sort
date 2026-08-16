@@ -1,0 +1,45 @@
+name: integration-bargin-sort
+
+deployments:
+  - name: bargin-sort-deployment
+    entrypoint: main.py:scrape_auctions
+    work_pool:
+      name: dev-pool-docker
+      job_variables:
+        # Without this the pool falls back to its default, which is another
+        # project's image entirely.
+        image: integration-bargin-sort:latest
+        networks:
+          - project-hub-network
+        env:
+          # Cloudflare fallback. Requires flaresolverr on project-hub-network:
+          #   docker network connect project-hub-network flaresolverr
+          FLARESOLVERR_URL: "http://flaresolverr:8191/v1"
+          DB_HOST: "{{ prefect.blocks.secret.bargin-sort--database-host }}"
+          DB_PORT: "{{ prefect.blocks.secret.bargin-sort--database-port }}"
+          DB_USER: "{{ prefect.blocks.secret.bargin-sort--database-user }}"
+          DB_PASSWORD: "{{ prefect.blocks.secret.bargin-sort--database-password }}"
+          DB_NAME: "{{ prefect.blocks.secret.bargin-sort--database-name }}"
+
+  - name: bronze-retention
+    entrypoint: maintenance.py:bronze_retention
+    schedule:
+      cron: "0 4 1 * *"   # 04:00 on the 1st, just after a new month's partition opens
+    parameters:
+      months: 6
+      dry_run: false
+    work_pool:
+      name: dev-pool-docker
+      job_variables:
+        # Without this the pool falls back to its default, which is another
+        # project's image entirely.
+        image: integration-bargin-sort:latest
+        networks:
+          - project-hub-network
+        env:
+          DB_HOST: "{{ prefect.blocks.secret.bargin-sort--database-host }}"
+          DB_PORT: "{{ prefect.blocks.secret.bargin-sort--database-port }}"
+          DB_USER: "{{ prefect.blocks.secret.bargin-sort--database-user }}"
+          DB_PASSWORD: "{{ prefect.blocks.secret.bargin-sort--database-password }}"
+          DB_NAME: "{{ prefect.blocks.secret.bargin-sort--database-name }}"
+          ZIP_CODE: "m8w3b7"

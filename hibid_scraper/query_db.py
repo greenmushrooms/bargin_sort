@@ -14,74 +14,57 @@ Usage:
 
 import argparse
 import json
-import sqlite3
 import sys
-from pathlib import Path
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from config import Config
 
 load_dotenv()
 
 
-def get_db_path() -> str:
-    """Get database path from config."""
-    try:
-        config = Config.from_env()
-        return config.get_sqlite_path()
-    except ValueError:
-        # Default if no config
-        return "hibid_auctions.db"
+def connect_db(config: Config):
+    """Connect to PostgreSQL database."""
+    return psycopg2.connect(
+        host=config.db_host,
+        port=config.db_port,
+        user=config.db_user,
+        password=config.db_password,
+        dbname=config.db_name,
+    )
 
 
-def connect_db(db_path: str) -> sqlite3.Connection:
-    """Connect to database."""
-    if not Path(db_path).exists():
-        print(f"Error: Database not found at {db_path}")
-        print("Run the scraper first: python main.py --test")
-        sys.exit(1)
-
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def cmd_stats(conn: sqlite3.Connection) -> None:
+def cmd_stats(conn) -> None:
     """Show database statistics."""
-    cursor = conn.cursor()
+    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+        cursor.execute("SELECT COUNT(*) as count FROM bronze.raw_auction_items")
+        item_count = cursor.fetchone()["count"]
 
-    # Item count
-    cursor.execute("SELECT COUNT(*) as count FROM auction_items")
-    item_count = cursor.fetchone()["count"]
+        cursor.execute("SELECT COUNT(*) as count FROM bronze.scrape_runs")
+        run_count = cursor.fetchone()["count"]
 
-    # Run count
-    cursor.execute("SELECT COUNT(*) as count FROM scrape_runs")
-    run_count = cursor.fetchone()["count"]
+        cursor.execute("""
+            SELECT MIN(scraped_at) as oldest, MAX(scraped_at) as newest
+            FROM bronze.raw_auction_items
+        """)
+        dates = cursor.fetchone()
 
-    # Date range
-    cursor.execute("""
-        SELECT MIN(scraped_at) as oldest, MAX(scraped_at) as newest
-        FROM auction_items
-    """)
-    dates = cursor.fetchone()
+        cursor.execute("""
+            SELECT category, COUNT(*) as count
+            FROM bronze.raw_auction_items
+            GROUP BY category
+            ORDER BY count DESC
+        """)
+        categories = cursor.fetchall()
 
-    # Categories
-    cursor.execute("""
-        SELECT category, COUNT(*) as count
-        FROM auction_items
-        GROUP BY category
-        ORDER BY count DESC
-    """)
-    categories = cursor.fetchall()
-
-    # Zip codes
-    cursor.execute("""
-        SELECT zip_code, COUNT(*) as count
-        FROM auction_items
-        GROUP BY zip_code
-        ORDER BY count DESC
-    """)
-    zip_codes = cursor.fetchall()
+        cursor.execute("""
+            SELECT zip_code, COUNT(*) as count
+            FROM bronze.raw_auction_items
+            GROUP BY zip_code
+            ORDER BY count DESC
+        """)
+        zip_codes = cursor.fetchall()
 
     print("\n" + "=" * 50)
     print("DATABASE STATISTICS")
@@ -101,25 +84,23 @@ def cmd_stats(conn: sqlite3.Connection) -> None:
     print("=" * 50)
 
 
-def cmd_recent(conn: sqlite3.Connection, limit: int = 10) -> None:
+def cmd_recent(conn, limit: int = 10) -> None:
     """Show recent items."""
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT item_id, scraped_at, category, raw_json
-        FROM auction_items
-        ORDER BY scraped_at DESC
-        LIMIT ?
-    """, (limit,))
-
-    items = cursor.fetchall()
+    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+        cursor.execute("""
+            SELECT item_id, scraped_at, category, raw_json
+            FROM bronze.raw_auction_items
+            ORDER BY scraped_at DESC
+            LIMIT %s
+        """, (limit,))
+        items = cursor.fetchall()
 
     print(f"\n{len(items)} Most Recent Items:")
     print("-" * 80)
 
     for item in items:
-        raw = json.loads(item["raw_json"])
+        raw = item["raw_json"]
         title = raw.get("lead", "No title")[:50]
-        # Auction data is nested under auction_data from resolved references
         auction = raw.get("auction_data", {})
         event_name = auction.get("eventName", "Unknown")[:30]
         city = auction.get("eventCity", "")
@@ -133,16 +114,15 @@ def cmd_recent(conn: sqlite3.Connection, limit: int = 10) -> None:
         print("-" * 80)
 
 
-def cmd_runs(conn: sqlite3.Connection) -> None:
+def cmd_runs(conn) -> None:
     """Show scrape run history."""
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT * FROM scrape_runs
-        ORDER BY started_at DESC
-        LIMIT 20
-    """)
-
-    runs = cursor.fetchall()
+    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+        cursor.execute("""
+            SELECT * FROM bronze.scrape_runs
+            ORDER BY started_at DESC
+            LIMIT 20
+        """)
+        runs = cursor.fetchall()
 
     print("\nScrape Run History:")
     print("-" * 100)
@@ -150,6 +130,7 @@ def cmd_runs(conn: sqlite3.Connection) -> None:
     print("-" * 100)
 
     for run in runs:
+        started = str(run['started_at'])[:19]
         print(
             f"{run['id']:<5} "
             f"{run['status']:<12} "
@@ -158,17 +139,17 @@ def cmd_runs(conn: sqlite3.Connection) -> None:
             f"{run['items_found']:<8} "
             f"{run['items_added']:<8} "
             f"{run['errors']:<8} "
-            f"{run['started_at'][:19]}"
+            f"{started}"
         )
 
 
-def cmd_item(conn: sqlite3.Connection, item_id: str) -> None:
+def cmd_item(conn, item_id: str) -> None:
     """Show full JSON for an item."""
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM auction_items WHERE item_id = ?", (item_id,)
-    )
-    item = cursor.fetchone()
+    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+        cursor.execute(
+            "SELECT * FROM bronze.raw_auction_items WHERE item_id = %s", (item_id,)
+        )
+        item = cursor.fetchone()
 
     if not item:
         print(f"Item not found: {item_id}")
@@ -180,27 +161,25 @@ def cmd_item(conn: sqlite3.Connection, item_id: str) -> None:
     print(f"Category: {item['category'] or 'all'}")
     print("-" * 50)
     print("Raw JSON:")
-    print(json.dumps(json.loads(item["raw_json"]), indent=2))
+    print(json.dumps(item["raw_json"], indent=2))
 
 
-def cmd_search(conn: sqlite3.Connection, term: str) -> None:
+def cmd_search(conn, term: str) -> None:
     """Search items by text in JSON."""
-    cursor = conn.cursor()
-    # Search in raw_json text
-    cursor.execute("""
-        SELECT item_id, scraped_at, raw_json
-        FROM auction_items
-        WHERE raw_json LIKE ?
-        LIMIT 20
-    """, (f"%{term}%",))
-
-    items = cursor.fetchall()
+    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+        cursor.execute("""
+            SELECT item_id, scraped_at, raw_json
+            FROM bronze.raw_auction_items
+            WHERE raw_json::text ILIKE %s
+            LIMIT 20
+        """, (f"%{term}%",))
+        items = cursor.fetchall()
 
     print(f"\nSearch results for '{term}': {len(items)} items")
     print("-" * 80)
 
     for item in items:
-        raw = json.loads(item["raw_json"])
+        raw = item["raw_json"]
         title = raw.get("lead", "No title")[:60]
         print(f"{item['item_id']}: {title}")
 
@@ -217,15 +196,15 @@ def main() -> int:
         nargs="?",
         help="Command argument (item_id for 'item', search term for 'search', count for 'recent')",
     )
-    parser.add_argument(
-        "--db",
-        help="Database path (default: from .env or hibid_auctions.db)",
-    )
 
     args = parser.parse_args()
 
-    db_path = args.db or get_db_path()
-    conn = connect_db(db_path)
+    try:
+        config = Config.from_env()
+    except ValueError:
+        config = Config(zip_code="00000")
+
+    conn = connect_db(config)
 
     try:
         if args.command == "stats":

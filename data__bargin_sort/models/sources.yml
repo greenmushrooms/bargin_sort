@@ -1,0 +1,34 @@
+version: 2
+
+sources:
+  - name: bronze
+    schema: bronze
+    description: >
+      Append-only landing zone written by hibid_scraper. Partitioned by month
+      on scraped_at; partitions older than the retention window are dropped
+      wholesale, so silver must tolerate history disappearing from underneath it.
+    tables:
+      - name: raw_auction_items
+        description: One row per lot per scrape. Never updated.
+        columns:
+          - name: item_id
+            description: HiBid lot id. Not unique — one row per observation.
+            tests:
+              - not_null
+          - name: raw_json
+            description: Complete Apollo `Lot` object, with the resolved auction inlined.
+            tests:
+              - not_null
+          - name: scraped_at
+            description: Partition key.
+            tests:
+              - not_null
+          - name: sys_run_name
+            description: Prefect flow run name; the incremental watermark.
+            tests:
+              - not_null
+      - name: scrape_runs
+        description: Run-level bookkeeping, used to ignore incomplete runs.
+        columns:
+          - name: sys_run_name
+            tests: [not_null, unique]

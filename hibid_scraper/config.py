@@ -6,7 +6,6 @@ Loads settings from environment variables or .env file.
 
 import os
 from dataclasses import dataclass
-from typing import Optional
 from dotenv import load_dotenv
 
 # Load .env file if present
@@ -29,7 +28,19 @@ class Config:
     test_limit: int = 20
 
     # Database
-    database_url: str = "sqlite:///hibid_auctions.db"
+    db_host: str = "localhost"
+    db_port: int = 5432
+    db_user: str = "bargin_sort"
+    db_password: str = ""
+    db_name: str = "bargin_sort"
+
+    # FlareSolverr fallback for when Cloudflare 403s a direct request.
+    # Empty string disables the fallback.
+    flaresolverr_url: str = "http://flaresolverr:8191/v1"
+    flaresolverr_timeout_ms: int = 60000
+
+    # dbt project location. Empty means "look beside, then above, this module".
+    dbt_project_dir: str = ""
 
     # Rate limiting
     request_delay_min: int = 2
@@ -60,23 +71,21 @@ class Config:
             search_categories=categories,
             test_mode=os.getenv("TEST_MODE", "false").lower() == "true",
             test_limit=int(os.getenv("TEST_LIMIT", "20")),
-            database_url=os.getenv("DATABASE_URL", "sqlite:///hibid_auctions.db"),
+            db_host=os.getenv("DB_HOST", "localhost"),
+            db_port=int(os.getenv("DB_PORT", "5432")),
+            db_user=os.getenv("DB_USER", "bargin_sort"),
+            db_password=os.getenv("DB_PASSWORD", ""),
+            db_name=os.getenv("DB_NAME", "bargin_sort"),
+            flaresolverr_url=os.getenv(
+                "FLARESOLVERR_URL", "http://flaresolverr:8191/v1"
+            ).strip(),
+            flaresolverr_timeout_ms=int(os.getenv("FLARESOLVERR_TIMEOUT_MS", "60000")),
+            dbt_project_dir=os.getenv("DBT_PROJECT_DIR", "").strip(),
             request_delay_min=int(os.getenv("REQUEST_DELAY_MIN", "2")),
             request_delay_max=int(os.getenv("REQUEST_DELAY_MAX", "5")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )
 
-    def is_sqlite(self) -> bool:
-        """Check if using SQLite database."""
-        return self.database_url.startswith("sqlite:")
-
-    def is_postgres(self) -> bool:
-        """Check if using PostgreSQL database."""
-        return self.database_url.startswith("postgresql:")
-
-    def get_sqlite_path(self) -> Optional[str]:
-        """Extract SQLite file path from database URL."""
-        if self.is_sqlite():
-            # Format: sqlite:///path/to/db.db
-            return self.database_url.replace("sqlite:///", "")
-        return None
+    def get_connection_string(self) -> str:
+        """Build PostgreSQL connection string from parts."""
+        return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
