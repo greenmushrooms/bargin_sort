@@ -1,5 +1,12 @@
 name: integration-bargin-sort
 
+# The code is baked into the image, so point the worker at the container's
+# workdir. Without this, `prefect deploy` writes a set_working_directory step
+# using the host path, which does not exist inside the container.
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /opt/prefect
+
 deployments:
   - name: bargin-sort-deployment
     entrypoint: main.py:scrape_auctions
