@@ -335,6 +335,28 @@ class HiBidScraper:
             self.stats.errors += 1
             return None
 
+    @staticmethod
+    def _search_result_refs(apollo_state: dict) -> Optional[list[str]]:
+        """
+        The lot refs HiBid actually returned for this search, in its order.
+
+        The Apollo cache also holds lots the page merely referenced — featured
+        and related items from other auctions, carrying a stub auction with no
+        id or location. Those are not search results and must not be mistaken
+        for inventory in the requested radius.
+        """
+        root = apollo_state.get("ROOT_QUERY", {})
+        for key, value in root.items():
+            if key.startswith("lotSearch") and isinstance(value, dict):
+                results = (value.get("pagedResults") or {}).get("results")
+                if isinstance(results, list):
+                    return [
+                        r["__ref"]
+                        for r in results
+                        if isinstance(r, dict) and "__ref" in r
+                    ]
+        return None
+
     def _extract_lots_from_apollo(self, apollo_state: dict) -> list[dict]:
         """
         Extract lot objects from Apollo state.
@@ -353,8 +375,18 @@ class HiBidScraper:
                     auctions[key] = value
                     auctions[f"Auction:{auction_id}"] = value
 
-        # Second pass: collect lots and resolve auction references
-        for key, value in apollo_state.items():
+        # Second pass: collect the search results, in HiBid's own order. Fall
+        # back to every Lot in the cache only if the search node is absent,
+        # which upstream already treats as an unrendered page.
+        result_refs = self._search_result_refs(apollo_state)
+        if result_refs is None:
+            logger.warning("No lotSearch results node; falling back to all lots")
+            lot_keys = [k for k in apollo_state if k.startswith("Lot:")]
+        else:
+            lot_keys = result_refs
+
+        for key in lot_keys:
+            value = apollo_state.get(key)
             if isinstance(value, dict) and (
                 value.get("__typename") == "Lot" or key.startswith("Lot:")
             ):

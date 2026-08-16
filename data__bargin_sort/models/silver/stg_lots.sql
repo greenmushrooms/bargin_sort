@@ -47,6 +47,19 @@ source as (
 
 ),
 
+search_results as (
+
+    -- Rows scraped before the extractor was restricted to lotSearch results
+    -- include featured and related lots from other auctions. They carry a stub
+    -- auction with no id and no location, so they can never be placed in a
+    -- radius. They are inventory from somewhere else entirely, not near-misses.
+    -- Bronze keeps them; silver is the layer that conforms to "what we searched".
+    select *
+    from source
+    where raw_json -> 'auction_data' ->> 'id' is not null
+
+),
+
 renamed as (
 
     select
@@ -93,7 +106,7 @@ renamed as (
 
         raw_json                                        as raw_json
 
-    from source
+    from search_results
 
 )
 
