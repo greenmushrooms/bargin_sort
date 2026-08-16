@@ -22,7 +22,10 @@ import sys
 from prefect import flow, task
 
 from config import Config
-from database import Database, SCHEMA, TABLE
+from database import Database, SCHEMA
+
+# Every landing table under raw that retention applies to.
+SOURCE_TABLES = ("hibid", "police_auctions")
 
 RETENTION_MONTHS = 6
 
@@ -52,22 +55,25 @@ def apply_raw_retention(config: Config, months: int, dry_run: bool) -> dict:
 
             # Ask which partitions would go before touching anything, so a dry
             # run and a real run report the same thing.
-            cursor.execute(
-                f"""
-                SELECT c.relname
-                FROM pg_class c
-                JOIN pg_inherits i ON i.inhrelid = c.oid
-                JOIN pg_class p    ON p.oid = i.inhparent
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = %s
-                  AND p.relname = %s
-                  AND c.relname ~ ('^' || %s || '_[0-9]{{4}}_[0-9]{{2}}$')
-                  AND to_date(right(c.relname, 7), 'YYYY_MM') < date_trunc('month', %s::date)
-                ORDER BY c.relname
-                """,
-                (SCHEMA, TABLE, TABLE, cutoff),
-            )
-            targets = [row[0] for row in cursor.fetchall()]
+            targets = []
+            for table in SOURCE_TABLES:
+                cursor.execute(
+                    f"""
+                    SELECT c.relname
+                    FROM pg_class c
+                    JOIN pg_inherits i ON i.inhrelid = c.oid
+                    JOIN pg_class p    ON p.oid = i.inhparent
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = %s
+                      AND p.relname = %s
+                      AND c.relname ~ ('^' || %s || '_[0-9]{{4}}_[0-9]{{2}}$')
+                      AND to_date(right(c.relname, 7), 'YYYY_MM')
+                          < date_trunc('month', %s::date)
+                    ORDER BY c.relname
+                    """,
+                    (SCHEMA, table, table, cutoff),
+                )
+                targets.extend(row[0] for row in cursor.fetchall())
 
             if dry_run:
                 db.conn.rollback()
@@ -80,10 +86,12 @@ def apply_raw_retention(config: Config, months: int, dry_run: bool) -> dict:
                     "dry_run": True,
                 }
 
-            cursor.execute(
-                f"SELECT {SCHEMA}.drop_partitions_before(%s, %s)", (TABLE, cutoff)
-            )
-            dropped = [row[0] for row in cursor.fetchall()]
+            dropped = []
+            for table in SOURCE_TABLES:
+                cursor.execute(
+                    f"SELECT {SCHEMA}.drop_partitions_before(%s, %s)", (table, cutoff)
+                )
+                dropped.extend(row[0] for row in cursor.fetchall())
 
             cursor.execute(f"SELECT {SCHEMA}.delete_runs_before(%s)", (cutoff,))
             deleted_runs = cursor.fetchone()[0]

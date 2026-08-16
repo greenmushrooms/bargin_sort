@@ -26,10 +26,13 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 SCHEMA = "raw"
-SOURCE = "hibid"
-TABLE = "hibid"
 
-DDL_PATH = Path(__file__).parent / "sql" / "003_raw_schema.sql"
+# Landing table per source; the table is named for the source.
+DEFAULT_SOURCE = "hibid"
+
+SQL_DIR = Path(__file__).parent / "sql"
+# Applied on connect: the shared schema first, then each source's table.
+DDL_FILES = ("003_raw_schema.sql", "005_police_auctions.sql")
 
 # Rows buffered before a write. A full scrape is ~30k rows and committing each
 # one separately dominates the runtime.
@@ -39,8 +42,11 @@ INSERT_BATCH_SIZE = 500
 class Database:
     """PostgreSQL database handler for storing raw auction JSON payloads."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, source: str = DEFAULT_SOURCE):
         self.config = config
+        self.source = source
+        # One landing table per source, named for it.
+        self.table = source
         self.conn = None
         self._pending: list[tuple] = []
         self._ensured_months: set[str] = set()
@@ -75,9 +81,9 @@ class Database:
         The DDL lives in sql/003_raw_schema.sql so the schema has a single
         definition that can also be applied by hand or from a migration runner.
         """
-        ddl = DDL_PATH.read_text()
         with self.conn.cursor() as cursor:
-            cursor.execute(ddl)
+            for name in DDL_FILES:
+                cursor.execute((SQL_DIR / name).read_text())
         self.conn.commit()
         logger.info("Raw schema initialized")
         self._ensure_partition(datetime.now(timezone.utc))
@@ -90,7 +96,7 @@ class Database:
         with self.conn.cursor() as cursor:
             cursor.execute(
                 f"SELECT {SCHEMA}.ensure_month_partition(%s, %s)",
-                (TABLE, when.date()),
+                (self.table, when.date()),
             )
             partition = cursor.fetchone()[0]
         self.conn.commit()
@@ -108,7 +114,7 @@ class Database:
                 RETURNING id
                 """,
                 (
-                    SOURCE,
+                    self.source,
                     sys_run_name,
                     datetime.now(timezone.utc),
                     zip_code,
@@ -184,21 +190,21 @@ class Database:
             execute_values(
                 cursor,
                 f"""
-                INSERT INTO {SCHEMA}.{TABLE}
+                INSERT INTO {SCHEMA}.{self.table}
                 (sys_run_name, item_id, category, raw_json, scraped_at)
                 VALUES %s
                 """,
                 rows,
             )
         self.conn.commit()
-        logger.debug(f"Flushed {len(rows)} rows to {SCHEMA}.{TABLE}")
+        logger.debug(f"Flushed {len(rows)} rows to {SCHEMA}.{self.table}")
         return len(rows)
 
     def get_item(self, item_id: str) -> Optional[dict]:
         """Retrieve an item by ID."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(
-                f"SELECT * FROM {SCHEMA}.{TABLE} WHERE item_id = %s", (item_id,)
+                f"SELECT * FROM {SCHEMA}.{self.table} WHERE item_id = %s", (item_id,)
             )
             row = cursor.fetchone()
             if row:
@@ -210,7 +216,7 @@ class Database:
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(
                 f"""
-                SELECT * FROM {SCHEMA}.{TABLE}
+                SELECT * FROM {SCHEMA}.{self.table}
                 ORDER BY scraped_at DESC
                 LIMIT %s
                 """,
@@ -221,7 +227,7 @@ class Database:
     def get_item_count(self) -> int:
         """Get total number of items in database."""
         with self.conn.cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) FROM {SCHEMA}.{TABLE}")
+            cursor.execute(f"SELECT COUNT(*) FROM {SCHEMA}.{self.table}")
             return cursor.fetchone()[0]
 
     def get_run_stats(self, run_id: int) -> Optional[dict]:

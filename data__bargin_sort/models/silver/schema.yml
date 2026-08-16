@@ -51,3 +51,28 @@ models:
           - accepted_values:
               severity: warn
               values: ['CA', 'US']
+
+  - name: stg_police_lots
+    description: >
+      One row per listing per completed scrape of Police Auctions Canada. A
+      single warehouse, so location is a constant rather than a per-listing
+      field.
+    columns:
+      - name: item_id
+        tests: [not_null]
+      - name: lot_id
+        tests: [not_null]
+      - name: sys_run_name
+        tests: [not_null]
+      - name: title
+        tests: [not_null]
+      - name: lot_url
+        tests: [not_null]
+      - name: event_postal_key
+        description: Their warehouse FSA, taken from the site's own contact page.
+        tests: [not_null]
+      - name: lot_status
+        tests:
+          - accepted_values:
+              severity: warn
+              values: ['OPEN', 'CLOSED']

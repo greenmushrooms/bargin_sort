@@ -13,6 +13,7 @@ from prefect import flow, runtime, task
 
 from config import Config
 from database import Database
+from police_scraper import PoliceAuctionsScraper
 from scraper import HiBidScraper
 from transform import find_dbt_project, run_dbt
 
@@ -27,18 +28,26 @@ def setup_logging(level: str = "INFO") -> None:
     )
 
 
-@task(name="scrape_hibid")
-def scrape_hibid(config: Config, sys_run_name: str) -> dict:
-    """Scrape HiBid auctions and store results in the database."""
+# Both scrapers yield (item_id, payload, category) and share the fetch layer,
+# so one task drives either.
+SCRAPERS = {
+    "hibid": HiBidScraper,
+    "police_auctions": PoliceAuctionsScraper,
+}
+
+
+@task(name="scrape_source")
+def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> dict:
+    """Scrape a source and store its raw payloads."""
     logger = logging.getLogger(__name__)
 
-    if not config.zip_code:
+    if source == "hibid" and not config.zip_code:
         raise ValueError(
             "zip_code is required — pass it as a flow parameter or set ZIP_CODE"
         )
 
-    db = Database(config)
-    scraper = HiBidScraper(config)
+    db = Database(config, source=source)
+    scraper = SCRAPERS[source](config)
 
     start_time = datetime.now(timezone.utc)
     run_id = None
@@ -46,8 +55,13 @@ def scrape_hibid(config: Config, sys_run_name: str) -> dict:
     try:
         db.connect()
 
+        # Radius search is a HiBid concept; a single-warehouse source records
+        # neither, which is why the columns are nullable on the run table.
         run_id = db.start_scrape_run(
-            config.zip_code, config.radius_miles, config.test_mode, sys_run_name
+            config.zip_code if source == "hibid" else None,
+            config.radius_miles if source == "hibid" else None,
+            config.test_mode,
+            sys_run_name,
         )
         logger.info(f"Started scrape run #{run_id}")
 
@@ -148,7 +162,7 @@ def scrape_auctions(
         f"radius={radius_miles}, test_mode={test_mode}"
     )
 
-    result = scrape_hibid(config, sys_run_name=sys_run_name)
+    result = scrape_source(config, sys_run_name=sys_run_name, source="hibid")
 
     if not build_downstream:
         logger.info("Skipping silver build (build_downstream=False)")
@@ -157,6 +171,33 @@ def scrape_auctions(
     # Bronze is already durable at this point, so a transform failure costs the
     # freshness of silver but never the scrape itself. It still fails the flow,
     # because silently stale silver is worse than a visible red run.
+    result["transform"] = build_silver(config, sys_run_name=sys_run_name)
+    return result
+
+
+@flow(name="scrape_police_auctions")
+def scrape_police_auctions(
+    test_mode: bool = False,
+    test_limit: int = 20,
+    build_downstream: bool = True,
+) -> dict:
+    """Scrape Police Auctions Canada into raw, then rebuild silver for the run."""
+    setup_logging()
+    logger = logging.getLogger(__name__)
+
+    config = Config.from_env()
+    config.test_mode = test_mode
+    config.test_limit = test_limit
+
+    sys_run_name = runtime.flow_run.name
+    logger.info(f"Starting scrape_police_auctions flow: run={sys_run_name}")
+
+    result = scrape_source(config, sys_run_name=sys_run_name, source="police_auctions")
+
+    if not build_downstream:
+        logger.info("Skipping silver build (build_downstream=False)")
+        return result
+
     result["transform"] = build_silver(config, sys_run_name=sys_run_name)
     return result
 

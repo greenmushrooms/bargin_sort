@@ -22,8 +22,11 @@ models:
         tests: [not_null]
 
       - name: auction_id
+        description: >
+          Null for sources with no auction grouping — Police Auctions is a
+          single seller. The HiBid guarantee is kept by
+          assert_hibid_lots_have_auction instead.
         tests:
-          - not_null
           - relationships:
               to: ref('stg_auctions')
               field: auction_id

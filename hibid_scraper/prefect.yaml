@@ -31,6 +31,29 @@ deployments:
           DB_PASSWORD: "{{ prefect.blocks.secret.bargin-sort--database-password }}"
           DB_NAME: "{{ prefect.blocks.secret.bargin-sort--database-name }}"
 
+  - name: police-auctions-deployment
+    entrypoint: main.py:scrape_police_auctions
+    work_pool:
+      name: dev-pool-docker
+      job_variables:
+        # Without this the pool falls back to its default, which is another
+        # project's image entirely.
+        image: integration-bargin-sort:latest
+        networks:
+          - project-hub-network
+        env:
+          # Route the scraper's own loggers into Prefect's run logs; without
+          # this they go to container stdout and a failed run is undiagnosable.
+          PREFECT_LOGGING_EXTRA_LOGGERS: "scraper,database,transform,main,maintenance"
+          # Cloudflare fallback. Requires flaresolverr on project-hub-network:
+          #   docker network connect project-hub-network flaresolverr
+          FLARESOLVERR_URL: "http://flaresolverr:8191/v1"
+          DB_HOST: "{{ prefect.blocks.secret.bargin-sort--database-host }}"
+          DB_PORT: "{{ prefect.blocks.secret.bargin-sort--database-port }}"
+          DB_USER: "{{ prefect.blocks.secret.bargin-sort--database-user }}"
+          DB_PASSWORD: "{{ prefect.blocks.secret.bargin-sort--database-password }}"
+          DB_NAME: "{{ prefect.blocks.secret.bargin-sort--database-name }}"
+
   - name: raw-retention
     entrypoint: maintenance.py:raw_retention
     schedule:

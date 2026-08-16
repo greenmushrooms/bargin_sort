@@ -11,29 +11,18 @@ to extract lot data.
 
 import json
 import logging
-import random
 import re
-import time
-import uuid
-from dataclasses import dataclass
 from typing import Iterator, Optional
 
-import requests
 from bs4 import BeautifulSoup
 
 from config import Config
+from fetcher import PageFetcher, ScrapeStats
 
 logger = logging.getLogger(__name__)
 
 # HiBid base URL (works for nationwide search)
 HIBID_BASE_URL = "https://hibid.com"
-
-# User agent to avoid being blocked
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
 
 # Items per page (HiBid's default is 100, but we use smaller batches for stability)
 ITEMS_PER_PAGE = 100
@@ -42,59 +31,10 @@ ITEMS_PER_PAGE = 100
 END_OF_RESULTS_CONFIRMATIONS = 3
 
 
-class IncompletePageError(Exception):
-    """
-    HiBid answered before it had rendered its Apollo state.
-
-    Responses sometimes carry an empty `{"apollo.state":{}}`, most often on the
-    first request of a fresh FlareSolverr browser session. Retrying gets the
-    fully rendered page, so this is kept distinct from a transport error, which
-    instead means the browser session is gone.
-    """
-
-
-class CloudflareBlockedError(requests.RequestException):
-    """
-    HiBid's Cloudflare edge refused a direct request with a 403.
-
-    Only reachable with FLARESOLVERR_URL unset, since a configured FlareSolverr
-    drives a real browser and clears the challenge. Whether a direct request is
-    blocked varies with the caller's IP reputation rather than being permanent.
-    """
-
-
-@dataclass
-class ScrapeStats:
-    """Statistics for a scrape operation."""
-
-    items_found: int = 0
-    items_added: int = 0
-    items_updated: int = 0
-    errors: int = 0
-    pages_scraped: int = 0
-
-
-class HiBidScraper:
+class HiBidScraper(PageFetcher):
     """Scraper for HiBid auction listings."""
 
-    def __init__(self, config: Config):
-        self.config = config
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-        })
-        self.stats = ScrapeStats()
-        self._flaresolverr_session: Optional[str] = None
-
-    def _delay(self) -> None:
-        """Apply random delay between requests."""
-        delay = random.uniform(
-            self.config.request_delay_min, self.config.request_delay_max
-        )
-        logger.debug(f"Sleeping for {delay:.2f} seconds")
-        time.sleep(delay)
+    source = "hibid"
 
     def _build_url(self, category: Optional[str], page: int) -> str:
         """Build HiBid search URL."""
@@ -116,93 +56,8 @@ class HiBidScraper:
         query_string = "&".join(f"{k}={v}" for k, v in params.items())
         return f"{url}?{query_string}"
 
-    def _flaresolverr_command(self, payload: dict) -> dict:
-        """Send a command to FlareSolverr and return its JSON envelope."""
-        response = self.session.post(
-            self.config.flaresolverr_url,
-            json=payload,
-            timeout=(self.config.flaresolverr_timeout_ms / 1000) + 30,
-        )
-        response.raise_for_status()
-        return response.json()
-
-    def _ensure_flaresolverr_session(self) -> None:
-        """
-        Create a reusable FlareSolverr browser session.
-
-        Reusing one browser across pages keeps the solved Cloudflare cookies
-        warm, so only the first request pays the challenge cost. Failure here
-        is not fatal — requests just fall back to a throwaway browser each time.
-        """
-        if self._flaresolverr_session:
-            return
-
-        session_id = f"hibid-{uuid.uuid4().hex[:8]}"
-        try:
-            envelope = self._flaresolverr_command(
-                {"cmd": "sessions.create", "session": session_id}
-            )
-        except (requests.RequestException, ValueError) as e:
-            logger.warning(f"Could not create FlareSolverr session: {e}")
-            return
-
-        if envelope.get("status") != "ok":
-            logger.warning(f"FlareSolverr refused session: {envelope.get('message')}")
-            return
-
-        self._flaresolverr_session = session_id
-        logger.info(f"FlareSolverr session created: {session_id}")
-
-    def _rotate_flaresolverr_session(self) -> None:
-        """Discard the browser session so the next request builds a fresh one."""
-        if not self._flaresolverr_session:
-            return
-        try:
-            self._flaresolverr_command(
-                {"cmd": "sessions.destroy", "session": self._flaresolverr_session}
-            )
-        except (requests.RequestException, ValueError) as e:
-            logger.debug(f"Could not destroy session {self._flaresolverr_session}: {e}")
-        finally:
-            self._flaresolverr_session = None
-
-    def _fetch_via_flaresolverr(self, url: str) -> Optional[str]:
-        """Fetch a page through FlareSolverr, which solves Cloudflare's bot check."""
-        self._ensure_flaresolverr_session()
-
-        payload = {
-            "cmd": "request.get",
-            "url": url,
-            "maxTimeout": self.config.flaresolverr_timeout_ms,
-        }
-        if self._flaresolverr_session:
-            payload["session"] = self._flaresolverr_session
-
-        envelope = self._flaresolverr_command(payload)
-
-        if envelope.get("status") != "ok":
-            raise requests.RequestException(
-                f"FlareSolverr error: {envelope.get('message')}"
-            )
-
-        solution = envelope.get("solution") or {}
-        if solution.get("status") != 200:
-            raise requests.RequestException(
-                f"FlareSolverr got HTTP {solution.get('status')} for {url}"
-            )
-
-        return solution.get("response") or ""
-
-    def _fetch_direct(self, url: str) -> str:
-        """Fetch a page with a plain HTTP request."""
-        response = self.session.get(url, timeout=30)
-        if response.status_code == 403:
-            raise CloudflareBlockedError(f"Cloudflare returned 403 for {url}")
-        response.raise_for_status()
-        return response.text
-
     @staticmethod
-    def _is_end_of_results(html: str) -> bool:
+    def is_end_of_results(html: str) -> bool:
         """
         Detect the stub HiBid serves for a page past the last one.
 
@@ -213,9 +68,9 @@ class HiBidScraper:
         return len(html) < 1000 and 'id="hibid-state"' not in html
 
     @staticmethod
-    def _has_rendered_state(html: str) -> bool:
+    def is_incomplete(html: str) -> bool:
         """
-        Check that the page carries search results, not just an Apollo state.
+        A page carrying an Apollo state but no search results is not finished.
 
         HiBid often serves a state populated only with site chrome and no
         `lotSearch` node. Those pages parse cleanly and yield zero lots, which
@@ -223,88 +78,11 @@ class HiBidScraper:
         """
         # A populated state serialises as {"apollo.state":{"Lot:123":...}, so the
         # opening brace-quote is what separates a real payload from an empty one.
-        return (
+        return not (
             'id="hibid-state"' in html
             and '"apollo.state":{"' in html
             and "lotSearch(" in html
         )
-
-    def _fetch_page(self, url: str, retries: int = 5) -> Optional[str]:
-        """
-        Fetch a page with retry logic.
-
-        Every request goes through FlareSolverr when it is configured. Fetching
-        directly is faster but Cloudflare blocks it unpredictably, and a run
-        that quietly loses pages to a 403 is worse than a slow one.
-        """
-        stub_attempts = 0
-
-        for attempt in range(retries):
-            try:
-                logger.debug(f"Fetching: {url} (attempt {attempt + 1}/{retries})")
-
-                if self.config.flaresolverr_url:
-                    html = self._fetch_via_flaresolverr(url)
-                else:
-                    html = self._fetch_direct(url)
-
-                # An empty string means a clean end; None means failure.
-                if self._is_end_of_results(html):
-                    # The stub also shows up transiently mid-pagination, and
-                    # believing the first one truncates the scrape silently —
-                    # it looks like a clean finish, errors and all zero. Make
-                    # it prove itself on a fresh browser before accepting it.
-                    stub_attempts += 1
-                    if stub_attempts < END_OF_RESULTS_CONFIRMATIONS:
-                        logger.info(
-                            f"Empty stub for {url}; confirming "
-                            f"({stub_attempts}/{END_OF_RESULTS_CONFIRMATIONS})"
-                        )
-                        self._rotate_flaresolverr_session()
-                        time.sleep(2 * stub_attempts)
-                        continue
-                    logger.info(f"Confirmed end of results at {url}")
-                    return ""
-
-                if not self._has_rendered_state(html):
-                    raise IncompletePageError(f"Apollo state not rendered for {url}")
-
-                return html
-            except IncompletePageError as e:
-                # The connection is healthy — the page just needs another pass.
-                logger.warning(f"{e}; retrying ({attempt + 1}/{retries})")
-                if attempt < retries - 1:
-                    # A browser that keeps handing back the same unrendered page
-                    # is probably serving it from cache, so start a clean one.
-                    if attempt >= 1:
-                        self._rotate_flaresolverr_session()
-                    time.sleep(2 + 2 * attempt)
-                    continue
-                logger.error(f"Never got a rendered page for {url}")
-                self.stats.errors += 1
-                return None
-            except (requests.RequestException, ValueError) as e:
-                logger.warning(f"Request failed: {e}")
-                # A browser session that died would fail every remaining retry,
-                # so drop it and let the next attempt build a fresh one.
-                # FlareSolverr reaps the orphan on its own idle timeout.
-                self._flaresolverr_session = None
-                if attempt < retries - 1:
-                    wait_time = (attempt + 1) * 5
-                    logger.info(f"Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"All retries exhausted for {url}")
-                    self.stats.errors += 1
-                    return None
-        return None
-
-    def close(self) -> None:
-        """Release the FlareSolverr browser session and the connection pool."""
-        if self._flaresolverr_session:
-            logger.info(f"Closing FlareSolverr session {self._flaresolverr_session}")
-            self._rotate_flaresolverr_session()
-        self.session.close()
 
     def _extract_apollo_state(self, html: str) -> Optional[dict]:
         """
@@ -472,7 +250,7 @@ class HiBidScraper:
 
         while total_items < test_limit:
             url = self._build_url(category, page)
-            html = self._fetch_page(url)
+            html = self.fetch_page(url)
 
             if html == "":
                 logger.info(f"Reached the end of the results at page {page}")
