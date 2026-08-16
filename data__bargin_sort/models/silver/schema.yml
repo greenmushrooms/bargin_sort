@@ -1,0 +1,53 @@
+version: 2
+
+models:
+  - name: stg_lots
+    description: >
+      One row per lot per completed scrape run, restricted to lots HiBid
+      actually returned as search results.
+    columns:
+      - name: item_id
+        description: HiBid lot id. Unique within a run, repeated across runs.
+        tests: [not_null]
+
+      - name: lot_id
+        tests: [not_null]
+
+      - name: sys_run_name
+        tests: [not_null]
+
+      - name: auction_id
+        description: >
+          Never null by construction — the model drops lots with no resolvable
+          auction, since those are featured items from other auctions that can
+          never be placed in a radius. This test is what keeps that guarantee.
+        tests: [not_null]
+
+      - name: title
+        tests: [not_null]
+
+      - name: lot_status
+        description: Status from lotState. Warns rather than fails, so a new HiBid status surfaces without stopping the pipeline.
+        tests:
+          - accepted_values:
+              severity: warn
+              values:
+                - OPEN
+                - CLOSED
+                - CLOSED_SHOW_STATUS
+                - POSTED
+                - POSTED_NO_INTERNET_BIDDING
+                - SOLD
+
+  - name: stg_auctions
+    description: One row per auction, collapsed to its most recent observation.
+    columns:
+      - name: auction_id
+        tests: [not_null, unique]
+
+      - name: event_country_code
+        description: Derived from the postal code's shape; the seed only covers CA and US.
+        tests:
+          - accepted_values:
+              severity: warn
+              values: ['CA', 'US']

@@ -1,0 +1,37 @@
+version: 2
+
+models:
+  - name: fct_lots
+    description: >
+      Current state of every lot, one row per item_id, with a great-circle
+      distance from the search origin.
+    columns:
+      - name: item_id
+        description: The grain. One row per lot, latest observation wins.
+        tests: [not_null, unique]
+
+      - name: lot_url
+        description: Link to the live lot, where the real current price is.
+        tests: [not_null]
+
+      - name: distance_km
+        description: >
+          Never null. Lots that cannot be placed are excluded upstream rather
+          than carried with an unknown distance, because a null here would
+          silently drop out of every radius filter.
+        tests: [not_null]
+
+      - name: auction_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_auctions')
+              field: auction_id
+
+  - name: lots_within_50km
+    description: The 50 km catalogue — the question the pipeline exists to answer.
+    columns:
+      - name: item_id
+        tests: [not_null, unique]
+      - name: distance_km
+        tests: [not_null]
