@@ -2,7 +2,7 @@
 --
 -- The auction is repeated inside each lot's payload, so this collapses to the
 -- most recently scraped copy of each auction. Rebuilt in full on every run,
--- which keeps it correct after bronze partitions are dropped.
+-- which keeps it correct after raw partitions are dropped.
 
 with lots as (
 

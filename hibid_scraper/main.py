@@ -63,7 +63,7 @@ def scrape_hibid(config: Config, sys_run_name: str) -> dict:
             items_inserted += 1
 
         # Get buffered rows on disk before the run is marked complete, so
-        # items_inserted always reflects what is actually in bronze.
+        # items_inserted always reflects what is actually in raw.
         db.flush()
 
         scraper_stats = scraper.get_stats()
@@ -129,7 +129,7 @@ def scrape_auctions(
     test_limit: int = 20,
     build_downstream: bool = True,
 ) -> dict:
-    """Scrape HiBid into bronze, then rebuild silver for that run."""
+    """Scrape HiBid into raw, then rebuild silver for that run."""
     setup_logging()
     logger = logging.getLogger(__name__)
 

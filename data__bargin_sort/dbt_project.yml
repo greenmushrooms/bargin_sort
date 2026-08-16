@@ -15,7 +15,7 @@ clean-targets:
 
 models:
   data__bargin_sort:
-    # Silver: bronze JSONB flattened into typed columns, deduplicated to one
+    # Silver: raw JSONB flattened into typed columns, deduplicated to one
     # row per lot per run. Tables rather than views because silver_enhanced
     # joins across them and the JSONB extraction is not cheap to repeat.
     silver:

@@ -6,14 +6,14 @@
     )
 }}
 
--- One row per lot per scrape run: bronze JSONB pulled apart into typed columns.
+-- One row per lot per scrape run: raw JSONB pulled apart into typed columns.
 --
 -- Incremental on sys_run_name, in three modes:
 --   * `--vars '{target_run: <name>}'` processes exactly that run. The scrape
 --     flow passes the job id it just finished, so a transform costs one run's
---     worth of work no matter how much history bronze holds.
+--     worth of work no matter how much history raw holds.
 --   * no var: picks up every run not already here (catch-up after a failure).
---   * `--full-refresh`: replays all of bronze from scratch.
+--   * `--full-refresh`: replays all of raw from scratch.
 --
 -- delete+insert on sys_run_name makes all three idempotent — re-running a job
 -- id replaces its slice rather than duplicating it.

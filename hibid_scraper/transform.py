@@ -1,5 +1,5 @@
 """
-dbt transform step — bronze into silver and silver_enhanced.
+dbt transform step — raw into silver and silver_enhanced.
 
 Invoked in-process via dbt's programmatic runner rather than a subprocess, so
 dbt's own failures surface as Python exceptions with the parsed results
@@ -49,7 +49,7 @@ def run_dbt(
 
     `target_run` scopes the incremental models to a single scrape run, which is
     what keeps a post-scrape transform proportional to the new data rather than
-    to everything bronze has ever held.
+    to everything raw has ever held.
     """
     # Imported lazily so that scraping still works in an environment without
     # dbt installed — only the transform step actually needs it.
