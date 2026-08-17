@@ -82,6 +82,32 @@ def paged_result_refs(
     return None
 
 
+def query_arguments(state: dict, query_prefix: str) -> Optional[dict]:
+    """
+    The arguments a paged query was called with.
+
+    ROOT_QUERY keys carry their arguments serialised into the key itself —
+    `lotSearch({"input":{"auctionId":755637,...})` — which is the only place a
+    page says which auction its results actually belong to. Catalogue pages
+    past their last one serve a lotSearch for a *different* auction, and
+    without reading this back there is no way to tell those results from the
+    ones that were asked for.
+    """
+    root = state.get("ROOT_QUERY", {})
+    for key in root:
+        if not key.startswith(query_prefix):
+            continue
+        start, end = key.find("("), key.rfind(")")
+        if start == -1 or end <= start:
+            continue
+        try:
+            return json.loads(key[start + 1 : end])
+        except json.JSONDecodeError:
+            logger.warning(f"Could not parse arguments from ROOT_QUERY key {key[:80]}")
+            return None
+    return None
+
+
 def has_rendered_query(html: str, query_prefix: str) -> bool:
     """
     Whether a page carries a populated cache containing the expected query.

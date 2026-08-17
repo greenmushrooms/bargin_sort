@@ -119,8 +119,7 @@ class HiBidScraper(PageFetcher):
             self.stats.errors += 1
         return state
 
-    @staticmethod
-    def _search_result_refs(apollo_state: dict) -> Optional[list[str]]:
+    def _search_result_refs(self, apollo_state: dict) -> Optional[list[str]]:
         """
         The lot refs HiBid actually returned for this search, in its order.
 
@@ -128,7 +127,27 @@ class HiBidScraper(PageFetcher):
         and related items from other auctions, carrying a stub auction with no
         id or location. Those are not search results and must not be mistaken
         for inventory in the requested radius.
+
+        In catalogue mode there is a second way to get the wrong lots: a page
+        past the auction's last serves a perfectly well-formed lotSearch scoped
+        to a *different* auction. Its results look exactly like ours, and
+        because catalogue lots carry no auction of their own they would be
+        stamped with the auction we asked for — filing a Missouri race car
+        under a Toronto contractor sale. The query's own arguments are the only
+        thing that says otherwise, so they are checked here.
         """
+        if self.config.auction_id:
+            args = apollo.query_arguments(apollo_state, "lotSearch") or {}
+            found = (args.get("input") or {}).get("auctionId")
+            # Normally null — a catalogue page asks by eventItemIds. Only a
+            # node naming a different auction is disqualifying.
+            if found is not None and str(found) != str(self.config.auction_id):
+                logger.warning(
+                    f"Page serves lotSearch for auction {found}, not "
+                    f"{self.config.auction_id}; discarding its results"
+                )
+                return []
+
         return apollo.paged_result_refs(apollo_state, "lotSearch")
 
     def _extract_lots_from_apollo(self, apollo_state: dict) -> list[dict]:
@@ -154,6 +173,13 @@ class HiBidScraper(PageFetcher):
         # which upstream already treats as an unrendered page.
         result_refs = self._search_result_refs(apollo_state)
         if result_refs is None:
+            if self.config.auction_id:
+                # Never in catalogue mode. Sweeping the cache picks up featured
+                # and related lots from other auctions, and those carry no
+                # auction of their own — so the fallback below would stamp them
+                # with this auction and silver would have no way to tell.
+                logger.warning("No lotSearch results node on a catalogue page")
+                return []
             logger.warning("No lotSearch results node; falling back to all lots")
             lot_keys = [k for k in apollo_state if k.startswith("Lot:")]
         else:
