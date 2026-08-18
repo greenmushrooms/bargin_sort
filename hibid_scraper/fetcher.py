@@ -72,6 +72,8 @@ class ScrapeStats:
     # outstanding, not the end of the catalogue.
     pages_done: set = field(default_factory=set)
     pages_failed: set = field(default_factory=set)
+    # Lowest page confirmed past the end of the catalogue, when one was found.
+    end_page: object = None
 
 
 class PageFetcher:

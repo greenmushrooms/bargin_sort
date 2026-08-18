@@ -85,6 +85,18 @@ select
     )                               as coverage_pct,
 
     p.last_page                     as resume_page,
+    cardinality(cp.pages_done)      as pages_banked,
+    cp.end_page,
+
+    -- Read to the catalogue's actual end, with no gaps behind it. A catalogue
+    -- shrinks as its auction closes, so lot_count routinely overstates what can
+    -- still be fetched — without this, an auction we have read completely sits
+    -- at 30% coverage and retries pages that no longer exist.
+    coalesce(
+        cp.end_page is not null
+        and cardinality(cp.pages_done) >= cp.end_page - 1,
+        false
+    )                               as catalogue_exhausted,
 
     round(
         extract(epoch from (s.close_at - now())) / 3600.0
@@ -98,6 +110,14 @@ select
         -- Enough of it is held, however many passes that took.
         when s.lot_count > 0
              and coalesce(c.lots_held, 0) >= s.lot_count * {{ completeness }}
+            then 'captured'
+
+        -- Or there is simply nothing left to fetch: every page up to the
+        -- catalogue's real end is banked. Coverage against lot_count may look
+        -- poor, but the missing lots closed and left the listing — no number of
+        -- further passes brings them back.
+        when cp.end_page is not null
+             and cardinality(cp.pages_done) >= cp.end_page - 1
             then 'captured'
 
         -- Closed while still short. Nothing can be done about these now, which
@@ -115,3 +135,4 @@ from {{ ref('auction_schedule') }} s
 left join coverage c on c.auction_id = s.auction_id
 left join attempts a on a.auction_id = s.auction_id
 left join {{ source('raw', 'catalog_progress') }} p on p.auction_id = s.auction_id
+left join {{ source('raw', 'catalog_pages') }} cp on cp.auction_id = s.auction_id

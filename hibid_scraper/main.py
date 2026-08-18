@@ -83,7 +83,9 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
         # work — a page that failed before is simply still outstanding, not a
         # point the scan has to restart from.
         if config.auction_id:
-            done, failed, attempts = db.get_catalog_pages(int(config.auction_id))
+            done, failed, attempts, end_page = db.get_catalog_pages(
+                int(config.auction_id)
+            )
 
             # First run under page tracking: carry over the old high-water mark
             # so auctions part-way through are not re-read from page 1.
@@ -98,6 +100,7 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
 
             config.catalog_pages_done = sorted(done)
             config.catalog_page_attempts = attempts
+            config.catalog_end_page = end_page
             config.catalog_expected_pages = (
                 math.ceil((config.auction_lot_count or 0) / CATALOG_ITEMS_PER_PAGE)
             )
@@ -150,6 +153,7 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
                 set(config.catalog_pages_done or []) | scraper_stats.pages_done,
                 scraper_stats.pages_failed,
                 config.catalog_expected_pages,
+                end_page=scraper_stats.end_page or config.catalog_end_page,
             )
 
         # Only a run that came back with nothing is worth failing now. Fetch
@@ -217,6 +221,7 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
                         scraper_stats.pages_done,
                         scraper_stats.pages_failed,
                         config.catalog_expected_pages,
+                        end_page=scraper_stats.end_page or config.catalog_end_page,
                     )
                 except psycopg2.Error as save_error:
                     logger.error(f"Could not save catalogue progress: {save_error}")

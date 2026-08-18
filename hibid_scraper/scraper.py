@@ -348,6 +348,9 @@ class HiBidScraper(PageFetcher):
         # Sellers add lots after discovery saw the auction, so allow a little
         # past the advertised end; the probe stops as soon as a page is empty.
         ceiling = expected + CATALOG_PAGE_OVERRUN if expected else budget
+        # A confirmed end beats lot_count: the catalogue cannot grow back.
+        if self.config.catalog_end_page:
+            ceiling = min(ceiling, self.config.catalog_end_page - 1)
 
         outstanding = [p for p in range(1, ceiling + 1) if p not in done]
         retired = [p for p in outstanding
@@ -409,17 +412,43 @@ class HiBidScraper(PageFetcher):
                 logger.warning(f"Page {page} failed; continuing to the next")
                 continue
 
-            consecutive_failures = 0
-
             if not lots:
-                # Genuinely empty. Past the advertised end this means the
-                # catalogue is smaller than discovery said, which is normal.
-                logger.info(f"Page {page} is empty; treating as past the end")
-                self.stats.pages_done.add(page)
-                if page > expected:
-                    break
+                # Empty. Believed as the end only if a lower page produced lots
+                # this pass — otherwise the same response is just throttling.
+                #
+                # A catalogue shrinks as its auction closes, because closed lots
+                # drop out of the listing, so the end routinely arrives long
+                # before lot_count says it should. Chasing the difference is
+                # what made late auctions return nothing at all instead of
+                # returning what was still there.
+                # A good page *below* this one — from this pass or any earlier
+                # one — is what makes the stub an ending rather than a throttle.
+                # Requiring it from this pass alone fails exactly when it
+                # matters: a resumed pass starts deep and never fetches a lower
+                # page, so the end could never be confirmed.
+                banked_below = [
+                    q for q in (self.stats.pages_done | set(done)) if q < page
+                ]
+                if banked_below:
+                    logger.info(
+                        f"Page {page} is past the end of the catalogue "
+                        f"(lot_count implied {expected} pages, it actually ends "
+                        f"here) — highest good page {max(banked_below)}"
+                    )
+                    self.stats.end_page = page
+                    return
+                logger.warning(
+                    f"Page {page} came back empty with nothing banked yet; "
+                    f"treating as unreadable rather than the end"
+                )
+                self.stats.pages_failed.add(page)
+                consecutive_failures += 1
+                if consecutive_failures >= CATALOG_CONSECUTIVE_FAILURES:
+                    return
                 continue
 
+            # Only a banked page clears the run of failures.
+            consecutive_failures = 0
             self.stats.pages_done.add(page)
             self.stats.pages_scraped += 1
             logger.info(f"Page {page}: {len(lots)} lots")
@@ -442,9 +471,12 @@ class HiBidScraper(PageFetcher):
         """
         One catalogue page, retried on its own.
 
-        Returns the lots, [] for a genuinely empty page, or None when the page
-        could not be read — which the caller treats as one page lost rather
-        than the end of the catalogue.
+        Returns the lots, [] when HiBid says there is nothing at this page, or
+        None when the page could not be read — one page lost, not an ending.
+
+        [] is deliberately ambiguous here and resolved by the caller: the
+        183-byte stub means both "past the end" and "throttled", and only the
+        caller knows whether a lower page succeeded this pass.
         """
         url = self._build_url(None, page)
 

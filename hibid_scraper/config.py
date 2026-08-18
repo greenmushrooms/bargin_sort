@@ -62,6 +62,10 @@ class Config:
     # last and eventually retired rather than blocking the rest.
     catalog_page_attempts: Optional[dict] = None
 
+    # Where the catalogue was last observed to end, capping the work queue so a
+    # catalogue that has shrunk is not chased to its original lot_count.
+    catalog_end_page: Optional[int] = None
+
     # Most pages one pass will fetch for a single auction, so one 43-page
     # catalogue cannot monopolise a sweep of twenty auctions.
     catalog_page_budget: int = 15

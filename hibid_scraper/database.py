@@ -39,6 +39,7 @@ DDL_FILES = (
     "007_catalog_progress.sql",
     "008_catalog_pages.sql",
     "009_catalog_page_attempts.sql",
+    "010_catalog_end_page.sql",
 )
 
 # Rows buffered before a write. A full scrape is ~30k rows and committing each
@@ -224,9 +225,9 @@ class Database:
 
     def get_catalog_pages(
         self, auction_id: int
-    ) -> tuple[set[int], set[int], dict[int, int]]:
+    ) -> tuple[set[int], set[int], dict[int, int], Optional[int]]:
         """
-        Pages banked, pages failed, and how many times each has been attempted.
+        Pages banked, pages failed, attempt counts, and where the catalogue ends.
 
         The complement of the banked set, up to expected_pages, is the work the
         next pass should do — so a page that failed is simply still outstanding
@@ -236,16 +237,16 @@ class Database:
         with self.conn.cursor() as cursor:
             cursor.execute(
                 f"""
-                SELECT pages_done, pages_failed, page_attempts
+                SELECT pages_done, pages_failed, page_attempts, end_page
                 FROM {SCHEMA}.catalog_pages WHERE auction_id = %s
                 """,
                 (auction_id,),
             )
             row = cursor.fetchone()
         if not row:
-            return set(), set(), {}
+            return set(), set(), {}, None
         attempts = {int(k): v for k, v in (row[2] or {}).items()}
-        return set(row[0] or []), set(row[1] or []), attempts
+        return set(row[0] or []), set(row[1] or []), attempts, row[3]
 
     def save_catalog_pages(
         self,
@@ -254,6 +255,7 @@ class Database:
         pages_failed: set[int],
         expected_pages: int,
         attempted: Optional[set[int]] = None,
+        end_page: Optional[int] = None,
     ) -> None:
         """
         Merge this pass's page results into the auction's progress.
@@ -276,8 +278,8 @@ class Database:
                 f"""
                 INSERT INTO {SCHEMA}.catalog_pages
                     (auction_id, pages_done, pages_failed, expected_pages,
-                     page_attempts, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                     page_attempts, end_page, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (auction_id) DO UPDATE SET
                     pages_done = ARRAY(
                         SELECT DISTINCT unnest(
@@ -297,6 +299,11 @@ class Database:
                                               {SCHEMA}.catalog_pages.expected_pages),
                     page_attempts = {SCHEMA}.catalog_pages.page_attempts ||
                                     EXCLUDED.page_attempts,
+                    -- Lowest wins: a catalogue only ever shrinks as it closes.
+                    end_page = LEAST(
+                        NULLIF({SCHEMA}.catalog_pages.end_page, 0),
+                        NULLIF(EXCLUDED.end_page, 0)
+                    ),
                     updated_at = EXCLUDED.updated_at
                 """,
                 (
@@ -305,6 +312,7 @@ class Database:
                     sorted(pages_failed),
                     expected_pages,
                     Json(bumped),
+                    end_page,
                     datetime.now(timezone.utc),
                 ),
             )
