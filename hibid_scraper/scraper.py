@@ -54,6 +54,16 @@ CATALOG_PAGE_OVERRUN = 2
 # no less complete.
 CATALOG_CONSECUTIVE_FAILURES = 3
 
+# Attempts a single page gets across all passes before it is retired.
+#
+# Failed pages sort lowest, so they were retried before pages never tried, and
+# three failures in a row trips the breaker — meaning an auction could spend
+# every pass re-failing the same pages and never reach the rest of its
+# catalogue. Retiring a page that has failed this many times is the difference
+# between "this catalogue is 15 of 43 forever" and "this catalogue is as
+# complete as HiBid will allow".
+CATALOG_MAX_PAGE_ATTEMPTS = 4
+
 
 class HiBidScraper(PageFetcher):
     """Scraper for HiBid auction listings."""
@@ -331,25 +341,46 @@ class HiBidScraper(PageFetcher):
         short-page and end-of-results heuristics were doing badly.
         """
         done = set(self.config.catalog_pages_done or [])
+        attempts = self.config.catalog_page_attempts or {}
         expected = self.config.catalog_expected_pages or 0
         budget = self.config.catalog_page_budget
 
         # Sellers add lots after discovery saw the auction, so allow a little
         # past the advertised end; the probe stops as soon as a page is empty.
         ceiling = expected + CATALOG_PAGE_OVERRUN if expected else budget
-        todo = [p for p in range(1, ceiling + 1) if p not in done][:budget]
+
+        outstanding = [p for p in range(1, ceiling + 1) if p not in done]
+        retired = [p for p in outstanding
+                   if attempts.get(p, 0) >= CATALOG_MAX_PAGE_ATTEMPTS]
+
+        # Never-tried pages first, then retries in order of least-tried. A page
+        # that keeps failing must never starve pages that have never been read —
+        # that is what pinned one 43-page catalogue at 15 pages.
+        fresh = [p for p in outstanding if p not in attempts]
+        stale = sorted(
+            (p for p in outstanding
+             if p in attempts and attempts[p] < CATALOG_MAX_PAGE_ATTEMPTS),
+            key=lambda p: (attempts[p], p),
+        )
+        todo = (fresh + stale)[:budget]
+
+        if retired:
+            logger.warning(
+                f"Auction {self.config.auction_id}: skipping {len(retired)} page(s) "
+                f"retired after {CATALOG_MAX_PAGE_ATTEMPTS} attempts: {retired[:10]}"
+            )
 
         if not todo:
             logger.info(
-                f"Auction {self.config.auction_id}: all {expected} pages already "
-                f"banked, nothing to fetch"
+                f"Auction {self.config.auction_id}: nothing left to fetch "
+                f"({len(done)} of {expected} pages banked, {len(retired)} retired)"
             )
             return
 
         logger.info(
             f"Scraping catalogue for auction {self.config.auction_id}: "
-            f"{len(todo)} of {ceiling} pages outstanding "
-            f"(have {len(done)}), budget {budget}"
+            f"{len(fresh)} fresh + {len(stale)} retry page(s) outstanding of "
+            f"{ceiling}, have {len(done)}, taking {len(todo)}"
         )
 
         test_limit = self.config.test_limit if self.config.test_mode else float("inf")

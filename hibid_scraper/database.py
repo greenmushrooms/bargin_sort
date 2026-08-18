@@ -38,6 +38,7 @@ DDL_FILES = (
     "006_hibid_auctions.sql",
     "007_catalog_progress.sql",
     "008_catalog_pages.sql",
+    "009_catalog_page_attempts.sql",
 )
 
 # Rows buffered before a write. A full scrape is ~30k rows and committing each
@@ -221,26 +222,30 @@ class Database:
         logger.debug(f"Flushed {len(rows)} rows to {SCHEMA}.{self.table}")
         return len(rows)
 
-    def get_catalog_pages(self, auction_id: int) -> tuple[set[int], set[int]]:
+    def get_catalog_pages(
+        self, auction_id: int
+    ) -> tuple[set[int], set[int], dict[int, int]]:
         """
-        Pages already banked for this auction, and pages that have failed.
+        Pages banked, pages failed, and how many times each has been attempted.
 
         The complement of the banked set, up to expected_pages, is the work the
         next pass should do — so a page that failed is simply still outstanding
-        rather than something that halted the scan.
+        rather than something that halted the scan. Attempt counts are what stop
+        an unreadable page from starving pages never tried.
         """
         with self.conn.cursor() as cursor:
             cursor.execute(
                 f"""
-                SELECT pages_done, pages_failed
+                SELECT pages_done, pages_failed, page_attempts
                 FROM {SCHEMA}.catalog_pages WHERE auction_id = %s
                 """,
                 (auction_id,),
             )
             row = cursor.fetchone()
         if not row:
-            return set(), set()
-        return set(row[0] or []), set(row[1] or [])
+            return set(), set(), {}
+        attempts = {int(k): v for k, v in (row[2] or {}).items()}
+        return set(row[0] or []), set(row[1] or []), attempts
 
     def save_catalog_pages(
         self,
@@ -248,6 +253,7 @@ class Database:
         pages_done: set[int],
         pages_failed: set[int],
         expected_pages: int,
+        attempted: Optional[set[int]] = None,
     ) -> None:
         """
         Merge this pass's page results into the auction's progress.
@@ -257,12 +263,21 @@ class Database:
         A page that succeeds is removed from the failed set, since a later
         success supersedes an earlier failure.
         """
+        # Merge rather than replace: the JSONB || operator takes the right-hand
+        # value per key, so the incremented counts must be computed here.
+        _, _, existing = self.get_catalog_pages(auction_id)
+        bumped = {
+            str(page): existing.get(page, 0) + 1
+            for page in (attempted or (pages_done | pages_failed))
+        }
+
         with self.conn.cursor() as cursor:
             cursor.execute(
                 f"""
                 INSERT INTO {SCHEMA}.catalog_pages
-                    (auction_id, pages_done, pages_failed, expected_pages, updated_at)
-                VALUES (%s, %s, %s, %s, %s)
+                    (auction_id, pages_done, pages_failed, expected_pages,
+                     page_attempts, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (auction_id) DO UPDATE SET
                     pages_done = ARRAY(
                         SELECT DISTINCT unnest(
@@ -280,6 +295,8 @@ class Database:
                     ),
                     expected_pages = GREATEST(EXCLUDED.expected_pages,
                                               {SCHEMA}.catalog_pages.expected_pages),
+                    page_attempts = {SCHEMA}.catalog_pages.page_attempts ||
+                                    EXCLUDED.page_attempts,
                     updated_at = EXCLUDED.updated_at
                 """,
                 (
@@ -287,6 +304,7 @@ class Database:
                     sorted(pages_done),
                     sorted(pages_failed),
                     expected_pages,
+                    Json(bumped),
                     datetime.now(timezone.utc),
                 ),
             )

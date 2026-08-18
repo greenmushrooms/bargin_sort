@@ -58,6 +58,10 @@ class Config:
     catalog_pages_done: Optional[list] = None
     catalog_expected_pages: int = 0
 
+    # Page number to attempt count, so pages that keep failing can be tried
+    # last and eventually retired rather than blocking the rest.
+    catalog_page_attempts: Optional[dict] = None
+
     # Most pages one pass will fetch for a single auction, so one 43-page
     # catalogue cannot monopolise a sweep of twenty auctions.
     catalog_page_budget: int = 15
