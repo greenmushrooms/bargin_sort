@@ -46,6 +46,13 @@ class Config:
     # discovery feed does not return.
     auction_payload: Optional[dict] = None
 
+    # Page to resume catalogue pagination from, 1 being the start.
+    #
+    # A large catalogue cannot be taken in one pass, and restarting at page 1
+    # every run just re-collects the front of it. The orchestrator carries the
+    # last page that yielded lots so the next run continues past it.
+    catalog_start_page: int = 1
+
     # How many lots discovery said this auction holds.
     #
     # The only independent check on whether a catalogue was captured whole. A

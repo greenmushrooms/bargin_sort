@@ -7,6 +7,7 @@ Scrapes auction items from HiBid and stores raw JSON payloads in PostgreSQL.
 
 import logging
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -73,6 +74,17 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
     try:
         db.connect()
 
+        # Resume a large catalogue where the last run stopped rather than
+        # re-reading its front pages.
+        if config.auction_id:
+            resume_from = db.get_catalog_progress(int(config.auction_id))
+            config.catalog_start_page = max(resume_from + 1, 1)
+            if resume_from:
+                logger.info(
+                    f"Auction {config.auction_id}: resuming at page "
+                    f"{config.catalog_start_page} (last good page {resume_from})"
+                )
+
         # zip_code and radius_miles are not the same kind of fact, and a
         # catalogue scrape is where that shows. The radius describes how the
         # search was run, so it is meaningless here. The postal code describes
@@ -106,35 +118,41 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
 
         scraper_stats = scraper.get_stats()
 
-        # A catalogue scrape is the only chance this auction gets: once its run
-        # is marked completed the orchestrator never selects it again. So a run
-        # that fetched nothing, or that lost pages to exhausted retries, has to
-        # fail rather than quietly retire the auction having captured a
-        # fraction of it. Raising marks the run failed, which puts the auction
-        # back in tomorrow's selection — raw is append-only, so re-scraping it
-        # costs nothing but the fetch.
+        # Progress is banked before anything can fail, because a partial pass
+        # still moved the catalogue forward and that is precisely what used to
+        # be thrown away.
         if config.auction_id and not config.test_mode:
-            if scraper_stats.errors:
+            db.save_catalog_progress(
+                int(config.auction_id), scraper_stats.last_page, items_inserted
+            )
+
+        # Only a run that came back with nothing is worth failing now. Fetch
+        # errors no longer condemn the whole pass: the pages that did land are
+        # real lots, and the resume point means the next run continues rather
+        # than repeating them.
+        if config.auction_id and not config.test_mode:
+            if scraper_stats.errors and not items_inserted:
                 raise RuntimeError(
                     f"Auction {config.auction_id}: {scraper_stats.errors} fetch "
-                    f"errors, so the catalogue is incomplete "
-                    f"({items_inserted} lots landed)"
+                    f"errors and no lots landed"
                 )
             if not items_inserted:
                 raise RuntimeError(
                     f"Auction {config.auction_id}: catalogue returned no lots"
                 )
 
-            # Backstop to the in-run page retries: if the catalogue still came
-            # back materially shorter than discovery said it was, fail rather
-            # than retire the auction on a partial capture. Tolerance is wide
-            # because sellers do pull lots between discovery and the scrape.
+            # A short catalogue is no longer a failure. Whether the auction is
+            # captured is now a question about how much of it we hold in total
+            # (auction_manifest counts distinct lots across every run), not
+            # about whether one pass got it all. Failing here instead threw
+            # away partial progress and sent large auctions back to page 1
+            # forever — a 4,296-lot catalogue sat at 28% after three runs.
             expected = config.auction_lot_count or 0
             if expected and items_inserted < expected * MIN_CATALOG_COMPLETENESS:
-                raise RuntimeError(
-                    f"Auction {config.auction_id}: captured {items_inserted} of "
-                    f"{expected} lots, below the "
-                    f"{MIN_CATALOG_COMPLETENESS:.0%} completeness floor"
+                logger.info(
+                    f"Auction {config.auction_id}: partial pass, "
+                    f"{items_inserted} of {expected} lots — progress saved at "
+                    f"page {scraper_stats.last_page} for the next run"
                 )
 
         db.complete_scrape_run(
@@ -164,6 +182,14 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
         logger.exception(f"Scrape failed: {e}")
         if run_id:
             scraper_stats = scraper.get_stats()
+            if config.auction_id and not config.test_mode:
+                try:
+                    db.flush()
+                    db.save_catalog_progress(
+                        int(config.auction_id), scraper_stats.last_page, 0
+                    )
+                except psycopg2.Error as save_error:
+                    logger.error(f"Could not save catalogue progress: {save_error}")
             db.complete_scrape_run(
                 run_id=run_id,
                 items_found=scraper_stats.items_found,
@@ -388,6 +414,7 @@ def scrape_closing_auctions(
     zip_code: str = "m8w3b7",
     days_ahead: int = 2,
     max_km: float = 50.0,
+    auction_delay_seconds: int = 20,
     test_mode: bool = False,
     test_limit: int = 20,
     build_downstream: bool = True,
@@ -420,8 +447,17 @@ def scrape_closing_auctions(
 
     scraped, failed = [], []
 
-    for target in targets:
+    for index, target in enumerate(targets):
         auction_id = target["auction_id"]
+
+        # The scraper pauses between pages but nothing paused between
+        # catalogues, so a sweep went straight from finishing one auction into
+        # the next and HiBid started degrading responses — well-formed pages
+        # holding fewer lots than the auction has. That is the throttling
+        # signature, and it cost 9 of 11 failures on the first full sweep.
+        if index:
+            logger.info(f"Pausing {auction_delay_seconds}s before the next catalogue")
+            time.sleep(auction_delay_seconds)
 
         # raw.scrape_runs is unique on (source, sys_run_name), and one flow run
         # produces many scrapes — so the auction id is what makes each run row

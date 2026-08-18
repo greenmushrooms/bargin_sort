@@ -36,6 +36,7 @@ DDL_FILES = (
     "003_raw_schema.sql",
     "005_police_auctions.sql",
     "006_hibid_auctions.sql",
+    "007_catalog_progress.sql",
 )
 
 # Rows buffered before a write. A full scrape is ~30k rows and committing each
@@ -218,6 +219,41 @@ class Database:
         self.conn.commit()
         logger.debug(f"Flushed {len(rows)} rows to {SCHEMA}.{self.table}")
         return len(rows)
+
+    def get_catalog_progress(self, auction_id: int) -> int:
+        """Last page of this auction's catalogue that yielded lots."""
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                f"SELECT last_page FROM {SCHEMA}.catalog_progress WHERE auction_id = %s",
+                (auction_id,),
+            )
+            row = cursor.fetchone()
+        return row[0] if row else 0
+
+    def save_catalog_progress(
+        self, auction_id: int, last_page: int, lots_seen: int
+    ) -> None:
+        """
+        Record where pagination reached, so the next run continues from there.
+
+        Written even when the run failed its completeness check: a partial pass
+        still moved the catalogue forward, and discarding that is what kept
+        large auctions re-reading page 1 forever.
+        """
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                INSERT INTO {SCHEMA}.catalog_progress
+                    (auction_id, last_page, lots_seen, updated_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (auction_id) DO UPDATE
+                    SET last_page  = EXCLUDED.last_page,
+                        lots_seen  = {SCHEMA}.catalog_progress.lots_seen + EXCLUDED.lots_seen,
+                        updated_at = EXCLUDED.updated_at
+                """,
+                (auction_id, last_page, lots_seen, datetime.now(timezone.utc)),
+            )
+        self.conn.commit()
 
     def get_item(self, item_id: str) -> Optional[dict]:
         """Retrieve an item by ID."""

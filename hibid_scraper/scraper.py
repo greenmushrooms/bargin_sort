@@ -10,6 +10,7 @@ to extract lot data.
 """
 
 import logging
+import time
 from typing import Iterator, Optional
 
 import apollo
@@ -28,8 +29,11 @@ ITEMS_PER_PAGE = 100
 END_OF_RESULTS_CONFIRMATIONS = 3
 
 # How many times a catalogue page that came back short is re-fetched while the
-# auction's lot count says more are still due.
+# auction's lot count says more are still due, and the base pause before each
+# attempt. Multiplied by the attempt number, so 8s, 16s, 24s: a short page is a
+# throttling signal, and re-asking immediately just earns another one.
 SHORT_PAGE_RETRIES = 3
+SHORT_PAGE_BACKOFF_SECONDS = 8
 
 
 class HiBidScraper(PageFetcher):
@@ -196,6 +200,25 @@ class HiBidScraper(PageFetcher):
                 auction_ref = lot.get("auction", {})
                 if isinstance(auction_ref, dict) and "__ref" in auction_ref:
                     ref_key = auction_ref["__ref"]
+
+                    # A catalogue page's own results can still include lots
+                    # belonging to other auctions — ones carrying their own
+                    # auction ref, so the payload fallback never touches them
+                    # and the query-level guard sees nothing wrong because the
+                    # query itself was ours. Observed live: an Australian
+                    # "27th Aug General collectors Auction" lot arriving in a
+                    # Toronto catalogue, postcode 3140, which geocodes to
+                    # nothing and fails fct_lots' not-null distance test.
+                    # We asked for one auction; anything else is not ours.
+                    if self.config.auction_id:
+                        ref_id = ref_key.replace("Auction:", "")
+                        if ref_id != str(self.config.auction_id):
+                            logger.warning(
+                                f"Lot {key} belongs to auction {ref_id}, not "
+                                f"{self.config.auction_id}; skipping"
+                            )
+                            continue
+
                     if ref_key in auctions:
                         lot["_resolved_auction"] = auctions[ref_key]
                 elif self.config.auction_id:
@@ -277,7 +300,12 @@ class HiBidScraper(PageFetcher):
 
         Yields: (item_id, raw_json) tuples
         """
-        page = 1
+        # Resume where the last run stopped. A large catalogue cannot be taken
+        # in one pass, and starting at page 1 every time re-collects the front
+        # of it — one 4,296-lot auction sat at 28% coverage after three runs
+        # doing exactly that.
+        page = self.config.catalog_start_page if self.config.auction_id else 1
+        first_page = page
         total_items = 0
         test_limit = self.config.test_limit if self.config.test_mode else float("inf")
         seen_ids = set()
@@ -296,6 +324,15 @@ class HiBidScraper(PageFetcher):
 
             if html == "":
                 logger.info(f"Reached the end of the results at page {page}")
+                # Ran off the end while resuming, so the deep pages are done.
+                # Reset progress: the next run sweeps from the front and fills
+                # whatever those pages missed on the way through.
+                if self.config.auction_id and first_page > 1:
+                    logger.info(
+                        f"Resumed at page {first_page} and reached the end; "
+                        f"progress resets so the next run starts over"
+                    )
+                    self.stats.last_page = 0
                 break
 
             if html is None:
@@ -335,11 +372,19 @@ class HiBidScraper(PageFetcher):
                 and attempt < SHORT_PAGE_RETRIES
             ):
                 attempt += 1
+                # HiBid throttles by degrading rather than erroring: it answers
+                # with a well-formed page holding fewer lots than it has. An
+                # immediate re-fetch just collects another short page, so back
+                # off before each attempt — measured across a 25-auction sweep,
+                # short pages were the failure mode in 9 of 11 failures while
+                # only one page failed to render at all.
+                backoff = SHORT_PAGE_BACKOFF_SECONDS * attempt
                 logger.warning(
                     f"Page {page} rendered {len(lots)} lots with "
-                    f"{expected - total_items} still due; re-fetching "
-                    f"({attempt}/{SHORT_PAGE_RETRIES})"
+                    f"{expected - total_items} still due; backing off "
+                    f"{backoff}s and re-fetching ({attempt}/{SHORT_PAGE_RETRIES})"
                 )
+                time.sleep(backoff)
                 self._rotate_flaresolverr_session()
                 retry_html = self.fetch_page(url)
                 if not retry_html:
@@ -365,6 +410,8 @@ class HiBidScraper(PageFetcher):
                 break
 
             logger.info(f"Page {page}: found {len(new_lots)} new items (total lots in state: {len(lots)})")
+            # This page produced lots, so it is a safe point to resume from.
+            self.stats.last_page = page
 
             for lot in new_lots:
                 if total_items >= test_limit:

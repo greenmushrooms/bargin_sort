@@ -59,6 +59,10 @@ class ScrapeStats:
     items_updated: int = 0
     errors: int = 0
     pages_scraped: int = 0
+    # Highest page that yielded lots, so a partial catalogue run can be
+    # resumed rather than restarted. 0 means pagination ran past the end and
+    # the next run should sweep from the beginning again.
+    last_page: int = 0
 
 
 class PageFetcher:

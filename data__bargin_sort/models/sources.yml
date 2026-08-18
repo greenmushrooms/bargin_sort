@@ -58,6 +58,18 @@ sources:
           - name: sys_run_name
             tests: [not_null]
 
+      - name: catalog_progress
+        description: >
+          Where each auction's catalogue pagination reached, so a partial pass
+          resumes instead of re-reading the front. Scheduler state: one mutable
+          row per auction, never a source of truth about lots.
+        columns:
+          - name: auction_id
+            tests: [not_null, unique]
+          - name: last_page
+            description: Highest page that yielded lots; 0 means start over.
+            tests: [not_null]
+
       - name: scrape_runs
         description: >
           Run bookkeeping across every source, including the per-run scrape

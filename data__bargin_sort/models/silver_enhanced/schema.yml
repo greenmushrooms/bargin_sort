@@ -76,8 +76,8 @@ models:
       - name: scrape_state
         description: >
           pending — in radius, still open, never attempted.
-          retry — attempted and not captured; the run failed, so it is still owed.
-          captured — a completed non-test run landed its catalogue.
+          retry — attempted and still short, with a resume point to continue from.
+          captured — enough distinct lots held, however many passes it took.
           missed — closed before it was ever captured. The number to watch.
           out_of_radius — outside the cutoff or not geocodable; never scraped.
         tests:
@@ -85,7 +85,17 @@ models:
           - accepted_values:
               values: ['pending', 'retry', 'captured', 'missed', 'out_of_radius']
 
-      - name: captured_lots
+      - name: lots_held
         description: >
-          Lots landed by the capturing run. Compare against lot_count to see
-          how complete it was; the scraper refuses anything under 90%.
+          Distinct lots of this auction in raw, across every pass. This is what
+          decides capture — not whether any single run got it all.
+        tests: [not_null]
+
+      - name: coverage_pct
+        description: lots_held as a percentage of the auction's advertised lot_count.
+
+      - name: resume_page
+        description: >
+          Page the next pass continues from, via raw.catalog_progress. Null
+          means never attempted; 0 means the last pass ran off the end and the
+          next should sweep from the front again.
