@@ -21,9 +21,10 @@ deployments:
         timezone: "America/Toronto"
     parameters:
       zip_code: "m8w3b7"
-      # 31 mi = 49.9 km. HiBid's radius is whole miles and it honours the
-      # figure loosely, so auction_schedule applies the exact 50 km cutoff.
-      radius_miles: 31
+      # Full 50 miles for the aggregation phase — cast wide, then decide from
+      # the data what is worth targeting. auction_schedule's radius_km var
+      # (80.5) applies the matching exact cutoff.
+      radius_miles: 50
       horizon_days: 14
       test_mode: false
       build_downstream: true
@@ -58,7 +59,9 @@ deployments:
       # auctions with it. The cost of the overlap is capturing ~a day earlier,
       # and dedup means it is still scraped exactly once.
       days_ahead: 2
-      max_km: 50.0
+      # 80.5 km = 50 miles, matching discovery. lots_within_50km keeps the
+      # tighter screen for "what is worth driving to".
+      max_km: 80.5
       test_mode: false
       build_downstream: true
     work_pool:

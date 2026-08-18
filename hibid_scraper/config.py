@@ -53,6 +53,15 @@ class Config:
     # last page that yielded lots so the next run continues past it.
     catalog_start_page: int = 1
 
+    # Pages already banked for this auction, and how many it is expected to
+    # have. The complement is the work for this pass.
+    catalog_pages_done: Optional[list] = None
+    catalog_expected_pages: int = 0
+
+    # Most pages one pass will fetch for a single auction, so one 43-page
+    # catalogue cannot monopolise a sweep of twenty auctions.
+    catalog_page_budget: int = 15
+
     # How many lots discovery said this auction holds.
     #
     # The only independent check on whether a catalogue was captured whole. A

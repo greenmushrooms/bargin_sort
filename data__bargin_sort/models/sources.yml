@@ -58,6 +58,21 @@ sources:
           - name: sys_run_name
             tests: [not_null]
 
+      - name: catalog_pages
+        description: >
+          Which pages of each auction's catalogue have been banked. The
+          complement of pages_done, up to expected_pages, is the work queue for
+          the next pass — so a failed page is outstanding work rather than
+          something that halts the scan.
+        columns:
+          - name: auction_id
+            tests: [not_null, unique]
+          - name: pages_done
+            tests: [not_null]
+          - name: expected_pages
+            description: ceil(lot_count / 100), as discovery last reported it.
+            tests: [not_null]
+
       - name: catalog_progress
         description: >
           Where each auction's catalogue pagination reached, so a partial pass

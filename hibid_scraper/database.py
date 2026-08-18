@@ -37,6 +37,7 @@ DDL_FILES = (
     "005_police_auctions.sql",
     "006_hibid_auctions.sql",
     "007_catalog_progress.sql",
+    "008_catalog_pages.sql",
 )
 
 # Rows buffered before a write. A full scrape is ~30k rows and committing each
@@ -220,6 +221,77 @@ class Database:
         logger.debug(f"Flushed {len(rows)} rows to {SCHEMA}.{self.table}")
         return len(rows)
 
+    def get_catalog_pages(self, auction_id: int) -> tuple[set[int], set[int]]:
+        """
+        Pages already banked for this auction, and pages that have failed.
+
+        The complement of the banked set, up to expected_pages, is the work the
+        next pass should do — so a page that failed is simply still outstanding
+        rather than something that halted the scan.
+        """
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT pages_done, pages_failed
+                FROM {SCHEMA}.catalog_pages WHERE auction_id = %s
+                """,
+                (auction_id,),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return set(), set()
+        return set(row[0] or []), set(row[1] or [])
+
+    def save_catalog_pages(
+        self,
+        auction_id: int,
+        pages_done: set[int],
+        pages_failed: set[int],
+        expected_pages: int,
+    ) -> None:
+        """
+        Merge this pass's page results into the auction's progress.
+
+        Union rather than replace: a pass only ever adds to what is known, so a
+        weak pass can never lose ground the way the old high-water mark did.
+        A page that succeeds is removed from the failed set, since a later
+        success supersedes an earlier failure.
+        """
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                INSERT INTO {SCHEMA}.catalog_pages
+                    (auction_id, pages_done, pages_failed, expected_pages, updated_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (auction_id) DO UPDATE SET
+                    pages_done = ARRAY(
+                        SELECT DISTINCT unnest(
+                            {SCHEMA}.catalog_pages.pages_done || EXCLUDED.pages_done
+                        ) ORDER BY 1
+                    ),
+                    pages_failed = ARRAY(
+                        SELECT DISTINCT p FROM unnest(
+                            {SCHEMA}.catalog_pages.pages_failed || EXCLUDED.pages_failed
+                        ) AS p
+                        WHERE p <> ALL (
+                            {SCHEMA}.catalog_pages.pages_done || EXCLUDED.pages_done
+                        )
+                        ORDER BY 1
+                    ),
+                    expected_pages = GREATEST(EXCLUDED.expected_pages,
+                                              {SCHEMA}.catalog_pages.expected_pages),
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (
+                    auction_id,
+                    sorted(pages_done),
+                    sorted(pages_failed),
+                    expected_pages,
+                    datetime.now(timezone.utc),
+                ),
+            )
+        self.conn.commit()
+
     def get_catalog_progress(self, auction_id: int) -> int:
         """Last page of this auction's catalogue that yielded lots."""
         with self.conn.cursor() as cursor:
@@ -231,7 +303,7 @@ class Database:
         return row[0] if row else 0
 
     def save_catalog_progress(
-        self, auction_id: int, last_page: int, lots_seen: int
+        self, auction_id: int, last_page: int, lots_seen: int, reset: bool = False
     ) -> None:
         """
         Record where pagination reached, so the next run continues from there.
@@ -247,11 +319,15 @@ class Database:
                     (auction_id, last_page, lots_seen, updated_at)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (auction_id) DO UPDATE
-                    SET last_page  = EXCLUDED.last_page,
+                    SET last_page  = CASE
+                            WHEN %s THEN EXCLUDED.last_page
+                            ELSE GREATEST({SCHEMA}.catalog_progress.last_page,
+                                          EXCLUDED.last_page)
+                        END,
                         lots_seen  = {SCHEMA}.catalog_progress.lots_seen + EXCLUDED.lots_seen,
                         updated_at = EXCLUDED.updated_at
                 """,
-                (auction_id, last_page, lots_seen, datetime.now(timezone.utc)),
+                (auction_id, last_page, lots_seen, datetime.now(timezone.utc), reset),
             )
         self.conn.commit()
 

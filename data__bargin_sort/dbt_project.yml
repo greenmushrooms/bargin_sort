@@ -13,6 +13,14 @@ clean-targets:
   - "target"
   - "dbt_packages"
 
+# Collection radius. Widened from 50 km to the full 50 miles (80.5 km) for a
+# multi-week aggregation phase: cast wide first, then decide from the data what
+# is actually worth targeting. `lots_within_50km` deliberately keeps the tighter
+# screen, so the two questions — what exists nearby, and what is worth driving
+# to — stay separable.
+vars:
+  radius_km: 80.5
+
 models:
   data__bargin_sort:
     # Silver: raw JSONB flattened into typed columns, deduplicated to one

@@ -17,7 +17,7 @@ import logging
 import random
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import requests
@@ -60,9 +60,18 @@ class ScrapeStats:
     errors: int = 0
     pages_scraped: int = 0
     # Highest page that yielded lots, so a partial catalogue run can be
-    # resumed rather than restarted. 0 means pagination ran past the end and
-    # the next run should sweep from the beginning again.
+    # resumed rather than restarted.
     last_page: int = 0
+    # Set only when pagination ran past the end of the catalogue, which is the
+    # one case where the resume point should go backwards to 0. Without it, a
+    # pass that simply fetched nothing is indistinguishable from a deliberate
+    # reset, and progress gets clobbered — auction 767653 re-read the same 700
+    # lots four times because its page-12 progress was overwritten with 7.
+    progress_reset: bool = False
+    # Pages banked and pages lost this pass. A lost page is one page of work
+    # outstanding, not the end of the catalogue.
+    pages_done: set = field(default_factory=set)
+    pages_failed: set = field(default_factory=set)
 
 
 class PageFetcher:

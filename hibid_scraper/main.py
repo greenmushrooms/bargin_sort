@@ -7,6 +7,7 @@ Scrapes auction items from HiBid and stores raw JSON payloads in PostgreSQL.
 
 import logging
 import sys
+import math
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -50,6 +51,10 @@ RADIUS_SOURCES = ("hibid", "hibid_auctions")
 # and the scrape, and a run that legitimately finds 891 of 900 is complete.
 MIN_CATALOG_COMPLETENESS = 0.9
 
+# Must match ITEMS_PER_PAGE in scraper.py — it is what turns an auction's lot
+# count into a page count.
+CATALOG_ITEMS_PER_PAGE = 100
+
 
 @task(name="scrape_source")
 def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> dict:
@@ -74,15 +79,31 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
     try:
         db.connect()
 
-        # Resume a large catalogue where the last run stopped rather than
-        # re-reading its front pages.
+        # Load which pages are already banked. The complement is this pass's
+        # work — a page that failed before is simply still outstanding, not a
+        # point the scan has to restart from.
         if config.auction_id:
-            resume_from = db.get_catalog_progress(int(config.auction_id))
-            config.catalog_start_page = max(resume_from + 1, 1)
-            if resume_from:
+            done, failed = db.get_catalog_pages(int(config.auction_id))
+
+            # First run under page tracking: carry over the old high-water mark
+            # so auctions part-way through are not re-read from page 1.
+            if not done:
+                legacy = db.get_catalog_progress(int(config.auction_id))
+                if legacy:
+                    done = set(range(1, legacy + 1))
+                    logger.info(
+                        f"Auction {config.auction_id}: adopting pages 1-{legacy} "
+                        f"from the previous high-water mark"
+                    )
+
+            config.catalog_pages_done = sorted(done)
+            config.catalog_expected_pages = (
+                math.ceil((config.auction_lot_count or 0) / CATALOG_ITEMS_PER_PAGE)
+            )
+            if failed:
                 logger.info(
-                    f"Auction {config.auction_id}: resuming at page "
-                    f"{config.catalog_start_page} (last good page {resume_from})"
+                    f"Auction {config.auction_id}: retrying {len(failed)} "
+                    f"previously failed page(s)"
                 )
 
         # zip_code and radius_miles are not the same kind of fact, and a
@@ -118,12 +139,16 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
 
         scraper_stats = scraper.get_stats()
 
-        # Progress is banked before anything can fail, because a partial pass
-        # still moved the catalogue forward and that is precisely what used to
-        # be thrown away.
+        # Page results are banked before anything can fail: a pass that read
+        # six pages and lost one still moved the catalogue six pages forward.
         if config.auction_id and not config.test_mode:
-            db.save_catalog_progress(
-                int(config.auction_id), scraper_stats.last_page, items_inserted
+            db.save_catalog_pages(
+                int(config.auction_id),
+                # Union with what was already known, so pages adopted from the
+                # old high-water mark are not dropped on the first save.
+                set(config.catalog_pages_done or []) | scraper_stats.pages_done,
+                scraper_stats.pages_failed,
+                config.catalog_expected_pages,
             )
 
         # Only a run that came back with nothing is worth failing now. Fetch
@@ -151,8 +176,9 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
             if expected and items_inserted < expected * MIN_CATALOG_COMPLETENESS:
                 logger.info(
                     f"Auction {config.auction_id}: partial pass, "
-                    f"{items_inserted} of {expected} lots — progress saved at "
-                    f"page {scraper_stats.last_page} for the next run"
+                    f"{items_inserted} of {expected} lots — banked pages "
+                    f"{sorted(scraper_stats.pages_done)}, outstanding "
+                    f"{sorted(scraper_stats.pages_failed)}"
                 )
 
         db.complete_scrape_run(
@@ -185,8 +211,11 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
             if config.auction_id and not config.test_mode:
                 try:
                     db.flush()
-                    db.save_catalog_progress(
-                        int(config.auction_id), scraper_stats.last_page, 0
+                    db.save_catalog_pages(
+                        int(config.auction_id),
+                        scraper_stats.pages_done,
+                        scraper_stats.pages_failed,
+                        config.catalog_expected_pages,
                     )
                 except psycopg2.Error as save_error:
                     logger.error(f"Could not save catalogue progress: {save_error}")

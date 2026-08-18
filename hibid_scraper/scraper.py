@@ -35,6 +35,25 @@ END_OF_RESULTS_CONFIRMATIONS = 3
 SHORT_PAGE_RETRIES = 3
 SHORT_PAGE_BACKOFF_SECONDS = 8
 
+# Attempts per catalogue page before it is recorded as failed and left for the
+# next pass. Low on purpose: a page that will not render now usually will later,
+# and moving on costs nothing now that a failure no longer aborts the scan.
+CATALOG_PAGE_ATTEMPTS = 3
+
+# How far past the advertised last page to probe. Sellers add lots after
+# discovery saw the auction, and an empty page stops it immediately.
+CATALOG_PAGE_OVERRUN = 2
+
+# Consecutive failures before a pass gives up on this auction for now.
+#
+# HiBid does not fail pages independently: once it starts answering with the
+# 183-byte stub it keeps doing so for a while. Measured on a 43-page catalogue,
+# pages 8-11 read cleanly and then 12-22 all stubbed — and each of those cost
+# three attempts with backoff, about eight minutes for nothing. Stopping banks
+# the good pages and leaves the rest as outstanding work, which is cheaper and
+# no less complete.
+CATALOG_CONSECUTIVE_FAILURES = 3
+
 
 class HiBidScraper(PageFetcher):
     """Scraper for HiBid auction listings."""
@@ -294,29 +313,163 @@ class HiBidScraper(PageFetcher):
 
         return enriched
 
+    def scrape_catalog(self) -> Iterator[tuple[str, dict]]:
+        """
+        Fetch the pages of one auction's catalogue that are not yet banked.
+
+        Page-at-a-time rather than a scan that halts. The old loop stopped on a
+        short page, but a short page is a throttling signal, not an end signal —
+        so one bad page at position 5 abandoned pages 6..N, and the next attempt
+        came a day later. Nine auctions closed at 46% average coverage that way,
+        losing 7,467 lots that cannot be re-read once HiBid zeroes them.
+
+        Here a failed page costs exactly one page: it stays out of `pages_done`,
+        lands in `pages_failed`, and is simply outstanding work next time.
+
+        `expected_pages` comes from discovery's lot_count, so the end of the
+        catalogue is known rather than inferred. That removes the guessing the
+        short-page and end-of-results heuristics were doing badly.
+        """
+        done = set(self.config.catalog_pages_done or [])
+        expected = self.config.catalog_expected_pages or 0
+        budget = self.config.catalog_page_budget
+
+        # Sellers add lots after discovery saw the auction, so allow a little
+        # past the advertised end; the probe stops as soon as a page is empty.
+        ceiling = expected + CATALOG_PAGE_OVERRUN if expected else budget
+        todo = [p for p in range(1, ceiling + 1) if p not in done][:budget]
+
+        if not todo:
+            logger.info(
+                f"Auction {self.config.auction_id}: all {expected} pages already "
+                f"banked, nothing to fetch"
+            )
+            return
+
+        logger.info(
+            f"Scraping catalogue for auction {self.config.auction_id}: "
+            f"{len(todo)} of {ceiling} pages outstanding "
+            f"(have {len(done)}), budget {budget}"
+        )
+
+        test_limit = self.config.test_limit if self.config.test_mode else float("inf")
+        total_items = 0
+        consecutive_failures = 0
+
+        for page in todo:
+            if total_items >= test_limit:
+                logger.info(f"Test mode limit reached ({test_limit} items)")
+                return
+
+            lots = self._fetch_catalog_page(page)
+
+            if lots is None:
+                # One page lost. Record it and keep going — the whole point.
+                self.stats.pages_failed.add(page)
+                consecutive_failures += 1
+                if consecutive_failures >= CATALOG_CONSECUTIVE_FAILURES:
+                    logger.warning(
+                        f"{consecutive_failures} pages failed in a row; HiBid is "
+                        f"throttling this session. Banking "
+                        f"{len(self.stats.pages_done)} page(s) and leaving "
+                        f"{len(todo) - todo.index(page) - 1} for the next pass"
+                    )
+                    return
+                logger.warning(f"Page {page} failed; continuing to the next")
+                continue
+
+            consecutive_failures = 0
+
+            if not lots:
+                # Genuinely empty. Past the advertised end this means the
+                # catalogue is smaller than discovery said, which is normal.
+                logger.info(f"Page {page} is empty; treating as past the end")
+                self.stats.pages_done.add(page)
+                if page > expected:
+                    break
+                continue
+
+            self.stats.pages_done.add(page)
+            self.stats.pages_scraped += 1
+            logger.info(f"Page {page}: {len(lots)} lots")
+
+            for lot in lots:
+                if total_items >= test_limit:
+                    return
+                item_id = self._get_item_id(lot)
+                if not item_id:
+                    logger.warning("Lot without ID, skipping")
+                    self.stats.errors += 1
+                    continue
+                total_items += 1
+                self.stats.items_found += 1
+                yield (item_id, self._enrich_lot_data(lot))
+
+            self._delay()
+
+    def _fetch_catalog_page(self, page: int) -> Optional[list[dict]]:
+        """
+        One catalogue page, retried on its own.
+
+        Returns the lots, [] for a genuinely empty page, or None when the page
+        could not be read — which the caller treats as one page lost rather
+        than the end of the catalogue.
+        """
+        url = self._build_url(None, page)
+
+        for attempt in range(1, CATALOG_PAGE_ATTEMPTS + 1):
+            # An empty string from fetch_page is its confirmed end-of-results
+            # stub. On a catalogue page we know exists — because lot_count says
+            # so — that is HiBid throttling, not the end, so it is retried like
+            # any other unreadable page rather than believed.
+            html = self.fetch_page(url, retries=2)
+            if not html:
+                # HiBid throttles by degrading rather than erroring, so backing
+                # off matters more than retrying quickly.
+                if attempt < CATALOG_PAGE_ATTEMPTS:
+                    backoff = SHORT_PAGE_BACKOFF_SECONDS * attempt
+                    logger.warning(
+                        f"Page {page} unreadable; backing off {backoff}s "
+                        f"({attempt}/{CATALOG_PAGE_ATTEMPTS})"
+                    )
+                    time.sleep(backoff)
+                    self._rotate_flaresolverr_session()
+                continue
+
+            state = self._extract_apollo_state(html)
+            if not state:
+                continue
+
+            lots = self._extract_lots_from_apollo(state)
+            if lots:
+                return lots
+
+            # A page with a rendered state and no lots is either past the end
+            # or a throttled render. Only believe it after a retry.
+            if attempt >= CATALOG_PAGE_ATTEMPTS:
+                return []
+            time.sleep(SHORT_PAGE_BACKOFF_SECONDS * attempt)
+            self._rotate_flaresolverr_session()
+
+        return None
+
     def scrape_category(self, category: Optional[str] = None) -> Iterator[tuple[str, dict]]:
         """
-        Scrape all items from a category.
+        Scrape all items from a radius search.
 
-        Yields: (item_id, raw_json) tuples
+        Catalogue mode has its own loop — see scrape_catalog. This one keeps the
+        heuristics it needs, because a radius search genuinely cannot know how
+        many pages it has.
         """
-        # Resume where the last run stopped. A large catalogue cannot be taken
-        # in one pass, and starting at page 1 every time re-collects the front
-        # of it — one 4,296-lot auction sat at 28% coverage after three runs
-        # doing exactly that.
-        page = self.config.catalog_start_page if self.config.auction_id else 1
-        first_page = page
+        page = 1
         total_items = 0
         test_limit = self.config.test_limit if self.config.test_mode else float("inf")
         seen_ids = set()
 
-        if self.config.auction_id:
-            logger.info(f"Scraping catalogue for auction {self.config.auction_id}")
-        else:
-            logger.info(
-                f"Scraping category: {category or 'all'} "
-                f"(zip: {self.config.zip_code}, radius: {self.config.radius_miles} miles)"
-            )
+        logger.info(
+            f"Scraping category: {category or 'all'} "
+            f"(zip: {self.config.zip_code}, radius: {self.config.radius_miles} miles)"
+        )
 
         while total_items < test_limit:
             url = self._build_url(category, page)
@@ -324,21 +477,9 @@ class HiBidScraper(PageFetcher):
 
             if html == "":
                 logger.info(f"Reached the end of the results at page {page}")
-                # Ran off the end while resuming, so the deep pages are done.
-                # Reset progress: the next run sweeps from the front and fills
-                # whatever those pages missed on the way through.
-                if self.config.auction_id and first_page > 1:
-                    logger.info(
-                        f"Resumed at page {first_page} and reached the end; "
-                        f"progress resets so the next run starts over"
-                    )
-                    self.stats.last_page = 0
                 break
 
             if html is None:
-                # Not the end of the results — the run is being cut short, so
-                # log it loudly enough that a truncated scrape is not read as a
-                # complete one. _fetch_page has already counted the error.
                 logger.error(
                     f"Giving up on page {page} after exhausting retries; "
                     f"results are incomplete beyond {total_items} items"
@@ -353,51 +494,6 @@ class HiBidScraper(PageFetcher):
             lots = self._extract_lots_from_apollo(apollo_state)
             self.stats.pages_scraped += 1
 
-            # A page that rendered only part of its lots is indistinguishable
-            # from the last page: both come back short carrying a valid
-            # lotSearch node, so `is_incomplete` cannot separate them and the
-            # short-page rule below believes the wrong one. Observed live — a
-            # 310-lot catalogue whose first page rendered 10 lots was captured
-            # as 10 and reported success.
-            #
-            # The auction's own lot count is what breaks the tie. While more
-            # lots are still due, a short page is a first reading rather than
-            # the truth, and gets re-fetched with a fresh browser.
-            expected = self.config.auction_lot_count or 0
-            attempt = 0
-            while (
-                expected
-                and len(lots) < ITEMS_PER_PAGE
-                and total_items + len(lots) < expected
-                and attempt < SHORT_PAGE_RETRIES
-            ):
-                attempt += 1
-                # HiBid throttles by degrading rather than erroring: it answers
-                # with a well-formed page holding fewer lots than it has. An
-                # immediate re-fetch just collects another short page, so back
-                # off before each attempt — measured across a 25-auction sweep,
-                # short pages were the failure mode in 9 of 11 failures while
-                # only one page failed to render at all.
-                backoff = SHORT_PAGE_BACKOFF_SECONDS * attempt
-                logger.warning(
-                    f"Page {page} rendered {len(lots)} lots with "
-                    f"{expected - total_items} still due; backing off "
-                    f"{backoff}s and re-fetching ({attempt}/{SHORT_PAGE_RETRIES})"
-                )
-                time.sleep(backoff)
-                self._rotate_flaresolverr_session()
-                retry_html = self.fetch_page(url)
-                if not retry_html:
-                    break
-                retry_state = self._extract_apollo_state(retry_html)
-                if not retry_state:
-                    break
-                self.stats.pages_scraped += 1
-                retry_lots = self._extract_lots_from_apollo(retry_state)
-                if len(retry_lots) > len(lots):
-                    lots = retry_lots
-
-            # Filter out lots we've already seen (duplicates across pages)
             new_lots = []
             for lot in lots:
                 item_id = self._get_item_id(lot)
@@ -409,32 +505,25 @@ class HiBidScraper(PageFetcher):
                 logger.info(f"No new items found on page {page}")
                 break
 
-            logger.info(f"Page {page}: found {len(new_lots)} new items (total lots in state: {len(lots)})")
-            # This page produced lots, so it is a safe point to resume from.
-            self.stats.last_page = page
+            logger.info(
+                f"Page {page}: found {len(new_lots)} new items "
+                f"(total lots in state: {len(lots)})"
+            )
 
             for lot in new_lots:
                 if total_items >= test_limit:
                     logger.info(f"Test mode limit reached ({test_limit} items)")
                     return
-
                 item_id = self._get_item_id(lot)
                 if item_id:
-                    enriched_lot = self._enrich_lot_data(lot)
                     total_items += 1
                     self.stats.items_found += 1
-                    yield (item_id, enriched_lot)
+                    yield (item_id, self._enrich_lot_data(lot))
                 else:
                     logger.warning("Lot without ID, skipping")
                     self.stats.errors += 1
 
-            # A page that came back short is the last one. A catalogue is exact
-            # about this — it returns a full page until it runs out — so the
-            # check can be too, which keeps the scrape from asking for a page
-            # past the end and paying three confirmation fetches to learn it.
-            # The radius search is looser, hence the wider margin there.
-            page_limit = ITEMS_PER_PAGE if self.config.auction_id else ITEMS_PER_PAGE // 2
-            if len(lots) < page_limit:
+            if len(lots) < ITEMS_PER_PAGE // 2:
                 logger.info("Partial page received, likely end of results")
                 break
 
@@ -447,6 +536,12 @@ class HiBidScraper(PageFetcher):
 
         Yields: (item_id, raw_json, category) tuples
         """
+        # Catalogue mode is not a category sweep — it is a known set of pages.
+        if self.config.auction_id:
+            for item_id, item in self.scrape_catalog():
+                yield (item_id, item, None)
+            return
+
         categories = self.config.search_categories or [None]
 
         for category in categories:
