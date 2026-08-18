@@ -93,6 +93,15 @@ class Config:
     flaresolverr_url: str = "http://flaresolverr:8191/v1"
     flaresolverr_timeout_ms: int = 60000
 
+    # Proxy for FlareSolverr's browser to use, e.g. http://gluetun-scraper:8888.
+    #
+    # This, not HTTPS_PROXY, is what hides the scraper from HiBid. HiBid is
+    # fetched with prefer_direct=False, so the request is made by FlareSolverr's
+    # Chrome and HiBid sees FlareSolverr's IP — proxying this container would
+    # change nothing. Empty disables it, which is also what keeps FlareSolverr
+    # unproxied for the other projects that share it.
+    flaresolverr_proxy: str = ""
+
     # dbt project location. Empty means "look beside, then above, this module".
     dbt_project_dir: str = ""
 
@@ -138,6 +147,7 @@ class Config:
                 "FLARESOLVERR_URL", "http://flaresolverr:8191/v1"
             ).strip(),
             flaresolverr_timeout_ms=int(os.getenv("FLARESOLVERR_TIMEOUT_MS", "60000")),
+            flaresolverr_proxy=os.getenv("FLARESOLVERR_PROXY", "").strip(),
             dbt_project_dir=os.getenv("DBT_PROJECT_DIR", "").strip(),
             request_delay_min=int(os.getenv("REQUEST_DELAY_MIN", "2")),
             request_delay_max=int(os.getenv("REQUEST_DELAY_MAX", "5")),

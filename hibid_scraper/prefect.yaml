@@ -37,6 +37,12 @@ deployments:
         env:
           PREFECT_LOGGING_EXTRA_LOGGERS: "scraper,auction_discovery,apollo,database,transform,main,maintenance"
           FLARESOLVERR_URL: "http://flaresolverr:8191/v1"
+          # HiBid never sees this container's IP — prefer_direct is False, so
+          # every HiBid request is made by FlareSolverr's Chrome. Proxying the
+          # scraper would change nothing; the proxy has to be handed to
+          # FlareSolverr, which is what this does. Empty disables it, leaving
+          # FlareSolverr unproxied for the other projects that share it.
+          FLARESOLVERR_PROXY: "http://gluetun-scraper:8888"
           DB_HOST: "{{ prefect.blocks.secret.bargin-sort--database-host }}"
           DB_PORT: "{{ prefect.blocks.secret.bargin-sort--database-port }}"
           DB_USER: "{{ prefect.blocks.secret.bargin-sort--database-user }}"
@@ -73,6 +79,7 @@ deployments:
         env:
           PREFECT_LOGGING_EXTRA_LOGGERS: "scraper,auction_discovery,apollo,database,transform,main,maintenance"
           FLARESOLVERR_URL: "http://flaresolverr:8191/v1"
+          FLARESOLVERR_PROXY: "http://gluetun-scraper:8888"
           DB_HOST: "{{ prefect.blocks.secret.bargin-sort--database-host }}"
           DB_PORT: "{{ prefect.blocks.secret.bargin-sort--database-port }}"
           DB_USER: "{{ prefect.blocks.secret.bargin-sort--database-user }}"

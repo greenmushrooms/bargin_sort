@@ -143,10 +143,11 @@ class PageFetcher:
             return
 
         session_id = f"{self.source}-{uuid.uuid4().hex[:8]}"
+        payload = {"cmd": "sessions.create", "session": session_id}
+        if self.config.flaresolverr_proxy:
+            payload["proxy"] = {"url": self.config.flaresolverr_proxy}
         try:
-            envelope = self._flaresolverr_command(
-                {"cmd": "sessions.create", "session": session_id}
-            )
+            envelope = self._flaresolverr_command(payload)
         except (requests.RequestException, ValueError) as e:
             logger.warning(f"Could not create FlareSolverr session: {e}")
             return
@@ -182,6 +183,11 @@ class PageFetcher:
         }
         if self._flaresolverr_session:
             payload["session"] = self._flaresolverr_session
+        elif self.config.flaresolverr_proxy:
+            # No session means a throwaway browser, which does not inherit the
+            # session's proxy — so it has to be set per request or that fetch
+            # would silently go out on the real IP.
+            payload["proxy"] = {"url": self.config.flaresolverr_proxy}
 
         envelope = self._flaresolverr_command(payload)
 

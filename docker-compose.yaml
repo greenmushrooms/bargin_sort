@@ -1,0 +1,69 @@
+# A PIA tunnel dedicated to the scraper.
+#
+# Separate from the media stack's gluetun-pia on purpose. That one shares its
+# network namespace with Deluge, slskd and Bitmagnet and runs port forwarding
+# on a Montreal exit — putting auction scraping behind the same exit IP as
+# torrent traffic is the opposite of what this is for. Same PIA account, which
+# allows several simultaneous connections, so no new credentials are needed.
+#
+# The credentials are read from the media stack's .env rather than copied, so
+# there is exactly one place to rotate them: ./.env is a symlink to it. It has
+# to be a symlink rather than an `env_file:` entry, because ${VPN_USER} in the
+# environment block is interpolated by compose from its own project .env — an
+# env_file is passed into the container and arrives too late to substitute,
+# which fails as "OpenVPN settings: user is empty".
+#
+# If that coupling is unwanted, replace the symlink with a real file holding
+# VPN_USER and VPN_PASS.
+#
+# What actually needs the tunnel is FlareSolverr, not this project's container.
+# HiBid is fetched with prefer_direct=False, so every HiBid request is made by
+# FlareSolverr's Chrome and HiBid sees FlareSolverr's IP — never the scraper's.
+# The scraper passes this proxy to FlareSolverr per request (FLARESOLVERR_PROXY),
+# which is why FlareSolverr itself does not need to move onto this namespace and
+# can keep serving the other projects that use it unproxied.
+#
+#   docker compose up -d gluetun-scraper
+
+services:
+  gluetun-scraper:
+    image: qmcgaw/gluetun
+    container_name: gluetun-scraper
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    environment:
+      - VPN_SERVICE_PROVIDER=private internet access
+      - OPENVPN_USER=${VPN_USER}
+      - OPENVPN_PASSWORD=${VPN_PASS}
+      # Local exit: the auctions are in the GTA, so a Toronto address keeps the
+      # traffic looking like what it is. "CA Ontario" is also a valid PIA region
+      # but its endpoints failed TLS negotiation repeatedly on two different
+      # servers while CA Montreal was up, so Toronto it is. No port forwarding —
+      # nothing here accepts inbound connections.
+      - SERVER_REGIONS=CA Toronto
+      - VPN_PORT_FORWARDING=off
+      # The HTTP proxy is the whole point of this container.
+      - HTTPPROXY=on
+      - HTTPPROXY_LISTENING_ADDRESS=:8888
+      # Docker networks must stay reachable or the proxy cannot be called from
+      # FlareSolverr on the same bridge.
+      - FIREWALL_OUTBOUND_SUBNETS=172.16.0.0/12,192.168.1.0/24
+      - HEALTH_SMALL_CHECK_TYPE=dns
+      - TZ=${TZ:-America/Toronto}
+    networks:
+      - project-hub-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+networks:
+  project-hub-network:
+    external: true
