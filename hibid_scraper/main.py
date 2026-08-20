@@ -223,8 +223,18 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
                         config.catalog_expected_pages,
                         end_page=scraper_stats.end_page or config.catalog_end_page,
                     )
-                except psycopg2.Error as save_error:
+                except Exception as save_error:
+                    # Anything at all: the point of this handler is that the run
+                    # still gets marked failed. A narrower guard let a ValueError
+                    # from save_catalog_pages escape and skip the update below,
+                    # stranding twenty runs at 'running' — which silver reads as
+                    # "still in flight" and excludes, so the lots they had
+                    # already banked stayed invisible.
                     logger.error(f"Could not save catalogue progress: {save_error}")
+                    # A failed statement leaves the connection in an aborted
+                    # transaction, where the completion UPDATE would fail too.
+                    if db.conn:
+                        db.conn.rollback()
             db.complete_scrape_run(
                 run_id=run_id,
                 items_found=scraper_stats.items_found,

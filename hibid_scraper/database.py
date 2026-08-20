@@ -267,7 +267,7 @@ class Database:
         """
         # Merge rather than replace: the JSONB || operator takes the right-hand
         # value per key, so the incremented counts must be computed here.
-        _, _, existing = self.get_catalog_pages(auction_id)
+        _, _, existing, _ = self.get_catalog_pages(auction_id)
         bumped = {
             str(page): existing.get(page, 0) + 1
             for page in (attempted or (pages_done | pages_failed))
