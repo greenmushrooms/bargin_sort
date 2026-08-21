@@ -17,6 +17,14 @@
 -- Police Auctions was excluded before, which mattered: it is a single warehouse
 -- with complete inventory and it is where every bike lives. A HiBid-only check
 -- would have reported zero bikes while 41 sat on PAC.
+-- Exclusions read the title plus the "Title:" line HiBid buries in the
+-- description, not the title alone. The title column is truncated mid-word --
+-- "New / Open Box - UL Listed... Sz 5.5x2.5mm" is a 120W laptop charger, and
+-- "charger", already in that row's exclude_regex, survives only in the buried
+-- line. Deliberately NOT the whole description: that haystack drops 19 of the
+-- 54 current matches, because listings mention cases, mounts and cables
+-- constantly -- it takes the gravel bike and nine of the headphones with it.
+
 \pset format aligned
 
 WITH live AS (
@@ -30,15 +38,19 @@ WITH live AS (
   WHERE f.recency_rank = 1
     AND coalesce(m.close_at, f.event_ends_at) > now()
     AND f.lot_status = 'OPEN'
+), named AS (
+  SELECT l.*,
+         l.title || ' ' || coalesce(substring(l.descr from 'Title: ([^\n]*)'), '') AS full_title
+  FROM live l
 )
 SELECT w.priority AS p, w.label, l.source,
        left(l.title, 44) AS title,
        l.high_bid AS bid, l.min_bid AS entry, l.bid_count AS bids, l.km,
        to_char(l.close_at AT TIME ZONE 'America/Toronto', 'Dy HH24:MI') AS closes,
        l.lot_url
-FROM live l
+FROM named l
 JOIN reference.wishlist w
   ON  CASE w.match_scope WHEN 'title' THEN l.title ELSE l.title || ' ' || l.descr END ~* w.match_regex
-  AND l.title !~* w.exclude_regex
+  AND l.full_title !~* w.exclude_regex
 ORDER BY w.priority, l.min_bid
 LIMIT 40;
