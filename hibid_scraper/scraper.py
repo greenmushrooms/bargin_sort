@@ -481,11 +481,27 @@ class HiBidScraper(PageFetcher):
         url = self._build_url(None, page)
 
         for attempt in range(1, CATALOG_PAGE_ATTEMPTS + 1):
-            # An empty string from fetch_page is its confirmed end-of-results
-            # stub. On a catalogue page we know exists — because lot_count says
-            # so — that is HiBid throttling, not the end, so it is retried like
-            # any other unreadable page rather than believed.
-            html = self.fetch_page(url, retries=2)
+            # The retry budget has to cover the confirmation budget. fetch_page
+            # only returns its end-of-results stub after END_OF_RESULTS_
+            # CONFIRMATIONS repeats, so asking for fewer retries than that means
+            # the confirmations can never be spent: the stub is recognised every
+            # time, never believed, and the page comes back None. That is what
+            # retries=2 against 3 confirmations did — on 2026-08-22 every
+            # catalogue whose page count had shrunk failed outright, because an
+            # ending could only ever arrive dressed as a lost page.
+            html = self.fetch_page(url, retries=END_OF_RESULTS_CONFIRMATIONS)
+
+            if html == "":
+                # Confirmed: three reads, a fresh browser each time, all of them
+                # the stub. Report it empty rather than lost. [] is what lets the
+                # caller apply the one test that separates a shrunken catalogue
+                # from a throttled one — whether a lower page ever banked.
+                logger.info(
+                    f"Page {page}: end-of-results stub confirmed "
+                    f"{END_OF_RESULTS_CONFIRMATIONS}x — reporting empty, not lost"
+                )
+                return []
+
             if not html:
                 # HiBid throttles by degrading rather than erroring, so backing
                 # off matters more than retrying quickly.

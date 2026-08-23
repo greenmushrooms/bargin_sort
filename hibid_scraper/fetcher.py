@@ -35,6 +35,13 @@ USER_AGENT = (
 # How many times an end-of-results signal must repeat before it is believed.
 END_OF_RESULTS_CONFIRMATIONS = 3
 
+# Closing a browser is control-plane work, not a page load, so it does not get
+# the fetch timeout. It is also called from the failure path — the moment
+# FlareSolverr is least responsive — and a destroy that blocks for the full
+# fetch budget would add minutes to every failing page. Better to give up on
+# the destroy quickly: the reap flow in maintenance.py collects what is missed.
+DESTROY_TIMEOUT_S = 15
+
 
 class IncompletePageError(Exception):
     """The server answered before the page had finished rendering."""
@@ -123,15 +130,32 @@ class PageFetcher:
         logger.debug(f"Sleeping for {delay:.2f} seconds")
         time.sleep(delay)
 
-    def _flaresolverr_command(self, payload: dict) -> dict:
+    def _flaresolverr_command(self, payload: dict, timeout: float = None) -> dict:
         """Send a command to FlareSolverr and return its JSON envelope."""
+        if timeout is None:
+            timeout = (self.config.flaresolverr_timeout_ms / 1000) + 30
         response = self.session.post(
-            self.config.flaresolverr_url,
-            json=payload,
-            timeout=(self.config.flaresolverr_timeout_ms / 1000) + 30,
+            self.config.flaresolverr_url, json=payload, timeout=timeout
         )
         response.raise_for_status()
         return response.json()
+
+    def _destroy_session(self, session_id: str) -> None:
+        """
+        Ask FlareSolverr to close one browser session. Best effort, but never
+        skipped: FlareSolverr has no idle reaper, so a session that is dropped
+        without a destroy is a Chrome process that survives until the container
+        is restarted. On 2026-08-22 forty-two of those accumulated and Chrome
+        stopped starting at all ("cannot connect to chrome ... not reachable"),
+        which failed one run outright and killed the next mid-catalogue.
+        """
+        try:
+            self._flaresolverr_command(
+                {"cmd": "sessions.destroy", "session": session_id},
+                timeout=DESTROY_TIMEOUT_S,
+            )
+        except (requests.RequestException, ValueError) as e:
+            logger.debug(f"Could not destroy session {session_id}: {e}")
 
     def _ensure_flaresolverr_session(self) -> None:
         """
@@ -151,7 +175,12 @@ class PageFetcher:
         try:
             envelope = self._flaresolverr_command(payload)
         except (requests.RequestException, ValueError) as e:
+            # A read timeout here is not a failure to create. FlareSolverr goes
+            # on building the browser and answers late, so the session usually
+            # does exist under this id — and this is the only place that will
+            # ever know the name. Say it out loud before giving up on it.
             logger.warning(f"Could not create FlareSolverr session: {e}")
+            self._destroy_session(session_id)
             return
 
         if envelope.get("status") != "ok":
@@ -165,14 +194,8 @@ class PageFetcher:
         """Discard the browser session so the next request builds a fresh one."""
         if not self._flaresolverr_session:
             return
-        try:
-            self._flaresolverr_command(
-                {"cmd": "sessions.destroy", "session": self._flaresolverr_session}
-            )
-        except (requests.RequestException, ValueError) as e:
-            logger.debug(f"Could not destroy session {self._flaresolverr_session}: {e}")
-        finally:
-            self._flaresolverr_session = None
+        self._destroy_session(self._flaresolverr_session)
+        self._flaresolverr_session = None
 
     def _fetch_via_flaresolverr(self, url: str) -> str:
         """Fetch a page through FlareSolverr, which solves Cloudflare's check."""
@@ -277,9 +300,11 @@ class PageFetcher:
             except (requests.RequestException, ValueError) as e:
                 logger.warning(f"Request failed: {e}")
                 # A dead browser session fails every remaining retry, so drop it
-                # and let the next attempt build a fresh one. FlareSolverr reaps
-                # the orphan on its own idle timeout.
-                self._flaresolverr_session = None
+                # and let the next attempt build a fresh one. It has to be
+                # destroyed rather than merely forgotten — the assumption that
+                # FlareSolverr reaps orphans on an idle timeout was wrong, and
+                # this line leaked one Chrome per failed request.
+                self._rotate_flaresolverr_session()
                 if attempt < retries - 1:
                     wait_time = (attempt + 1) * 5
                     logger.info(f"Retrying in {wait_time} seconds...")

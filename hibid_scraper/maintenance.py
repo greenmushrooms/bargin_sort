@@ -19,6 +19,7 @@ back in line:
 import logging
 import sys
 
+import requests
 from prefect import flow, task
 
 from config import Config
@@ -109,6 +110,86 @@ def apply_raw_retention(config: Config, months: int, dry_run: bool) -> dict:
 
     finally:
         db.close()
+
+
+@task(name="reap_flaresolverr_sessions")
+def reap_flaresolverr_sessions(config: Config, source: str, dry_run: bool) -> dict:
+    """
+    Destroy leftover FlareSolverr browser sessions belonging to `source`.
+
+    A session is a live Chrome and FlareSolverr never reaps one on its own, so
+    any session the scraper failed to destroy survives until the container is
+    restarted. The fetcher no longer strands them, but orphans already banked
+    outlive any number of clean runs, and Chrome stops starting entirely once
+    enough pile up — the 2026-08-22 outage began at forty-two.
+
+    Deliberately NOT a fetcher-startup sweep. sessions.list returns bare ids
+    and nothing else: no age, no owner. Discovery fans out seven or eight
+    concurrent catalogue scrapes that each hold a live `hibid-` session, and a
+    prefix sweep at startup cannot tell those from orphans — it would kill its
+    own siblings mid-page. Hence the guard below: reap only when this source
+    has no scrape in flight, which is the one moment every `hibid-` session is
+    known to be garbage.
+    """
+    logger = logging.getLogger(__name__)
+
+    db = Database(config)
+    try:
+        db.connect()
+        with db.conn.cursor() as cursor:
+            cursor.execute(
+                f"SELECT count(*) FROM {SCHEMA}.scrape_runs "
+                "WHERE source = %s AND status = 'running'",
+                (source,),
+            )
+            in_flight = cursor.fetchone()[0]
+    finally:
+        db.close()
+
+    if in_flight:
+        logger.warning(
+            f"{in_flight} {source} scrape(s) still running — skipping reap, "
+            "their sessions are indistinguishable from orphans"
+        )
+        return {"skipped": True, "in_flight": in_flight, "destroyed": []}
+
+    timeout = (config.flaresolverr_timeout_ms / 1000) + 30
+    listing = requests.post(
+        config.flaresolverr_url, json={"cmd": "sessions.list"}, timeout=timeout
+    )
+    listing.raise_for_status()
+    orphans = [
+        s for s in listing.json().get("sessions", []) if s.startswith(f"{source}-")
+    ]
+
+    if dry_run:
+        logger.info(f"Dry run — would destroy {len(orphans)}: {orphans or '(none)'}")
+        return {"skipped": False, "in_flight": 0, "would_destroy": orphans}
+
+    destroyed = []
+    for session_id in orphans:
+        try:
+            requests.post(
+                config.flaresolverr_url,
+                json={"cmd": "sessions.destroy", "session": session_id},
+                timeout=timeout,
+            ).raise_for_status()
+            destroyed.append(session_id)
+        except requests.RequestException as e:
+            logger.warning(f"Could not destroy {session_id}: {e}")
+
+    logger.info(f"Reaped {len(destroyed)}/{len(orphans)} orphaned sessions")
+    return {"skipped": False, "in_flight": 0, "destroyed": destroyed}
+
+
+@flow(name="flaresolverr_reap")
+def flaresolverr_reap(source: str = "hibid", dry_run: bool = False) -> dict:
+    """Close FlareSolverr browser sessions left behind by earlier scrapes."""
+    setup_logging()
+    logging.getLogger(__name__).info(
+        f"FlareSolverr reap: source={source}, dry_run={dry_run}"
+    )
+    return reap_flaresolverr_sessions(Config.from_env(), source=source, dry_run=dry_run)
 
 
 @flow(name="raw_retention")

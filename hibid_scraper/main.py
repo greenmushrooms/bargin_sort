@@ -161,14 +161,35 @@ def scrape_source(config: Config, sys_run_name: str, source: str = "hibid") -> d
         # real lots, and the resume point means the next run continues rather
         # than repeating them.
         if config.auction_id and not config.test_mode:
+            # A catalogue that has been read to its end legitimately returns
+            # nothing: every page is banked and the pages above it are the
+            # end-of-results stub. That is a finished auction, not a failed
+            # pass, and failing it made completion permanent — the auction
+            # could never come back green no matter how complete it was.
+            #
+            # The distinction is whether this pass established a clean ending.
+            # It has to be all three: an end (from this pass or a previous
+            # one), nothing lost, and no fetch errors. Any of those missing and
+            # zero lots is still the loud failure it should be.
+            ended_clean = (
+                (scraper_stats.end_page or config.catalog_end_page)
+                and not scraper_stats.pages_failed
+                and not scraper_stats.errors
+            )
             if scraper_stats.errors and not items_inserted:
                 raise RuntimeError(
                     f"Auction {config.auction_id}: {scraper_stats.errors} fetch "
                     f"errors and no lots landed"
                 )
-            if not items_inserted:
+            if not items_inserted and not ended_clean:
                 raise RuntimeError(
                     f"Auction {config.auction_id}: catalogue returned no lots"
+                )
+            if not items_inserted:
+                logger.info(
+                    f"Auction {config.auction_id}: nothing new — catalogue ends "
+                    f"at page {scraper_stats.end_page or config.catalog_end_page}"
+                    f" and every page below it is banked"
                 )
 
             # A short catalogue is no longer a failure. Whether the auction is
