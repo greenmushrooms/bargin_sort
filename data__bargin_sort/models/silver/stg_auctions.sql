@@ -45,7 +45,25 @@ select
     {{ normalize_postal("auction ->> 'eventZip'") }}  as event_postal_key,
     {{ postal_country("auction ->> 'eventZip'") }}    as event_country_code,
 
-    nullif(auction ->> 'eventDateEnd', '')::timestamp as event_ends_at,
+    -- eventDateEnd is a naive local string, exactly like the bidCloseDateTime
+    -- that stg_hibid_auctions is careful to name `bid_close_local`. Read as
+    -- UTC it lands up to 46 hours early, because it is the event's end DATE at
+    -- midnight rather than an instant: a lot closing 18:00 Toronto on the 25th
+    -- was reported as having ended 00:00 UTC on the 24th, and every "has this
+    -- closed" test downstream got the wrong answer. auction_schedule already
+    -- applies this conversion to the sibling column; this is the same rule on
+    -- the one fct_lots actually exposes.
+    (nullif(auction ->> 'eventDateEnd', '')::timestamp
+        at time zone 'America/Toronto')              as event_ends_at,
+
+    -- When bidding actually closes, which is the question every consumer of
+    -- this model is really asking. eventDateEnd above is the event's end DATE
+    -- at midnight and runs ~19 hours early against it, so using it as a
+    -- "has this closed" test hid 1,068 live lots from the triage site. Same
+    -- naive-local parse and the same Toronto conversion as
+    -- stg_hibid_auctions.bid_close_local, from the identical payload key.
+    (nullif(auction ->> 'bidCloseDateTime', '')::timestamp
+        at time zone 'America/Toronto')              as bid_close_at,
     nullif(auction ->> 'lotCount', '')::int           as lot_count,
     auction ->> 'bidType'                            as bid_type,
     auction ->> 'buyerPremium'                       as buyer_premium_text,

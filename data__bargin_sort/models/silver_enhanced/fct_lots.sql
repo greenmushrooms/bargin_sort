@@ -24,9 +24,21 @@ with hibid_lots as (
         -- resolves to the lot page (verified against live lots). Police
         -- Auctions publishes the link directly, so both arrive comparable.
         'https://hibid.com/lot/' || l.lot_id            as lot_url,
-        l.high_bid,
+        -- The peak across every observation of this lot, not the newest one.
+        --
+        -- HiBid zeroes lotState the moment an auction closes: a Jetson e-bike
+        -- observed at 19 bids and $160 reported highBid 0 and bidCount 0
+        -- thirty minutes later. Taking the latest observation would record
+        -- that lot as having sold for nothing, and the wishlist caps are meant
+        -- to be learned from exactly these final prices.
+        --
+        -- A max is safe because bids are monotonic -- they cannot fall -- so
+        -- for an open lot the peak is the current bid, and for a closed one it
+        -- is the price it finished at. A lot that closed with no bids was
+        -- always 0 and stays 0.
+        max(l.high_bid)  over (partition by l.source, l.item_id) as high_bid,
         l.min_bid,
-        l.bid_count,
+        max(l.bid_count) over (partition by l.source, l.item_id) as bid_count,
         l.lot_status,
         l.is_closed,
         l.time_left,
@@ -41,10 +53,29 @@ with hibid_lots as (
         a.event_state,
         a.event_country_code,
         a.event_postal_key,
-        a.event_ends_at
+        -- When bidding closes, in preference order, because the three
+        -- available answers are not equally trustworthy:
+        --
+        --  1. the dedicated auction scrape. HiBid extends auctions, and this
+        --     is the only source that sees it -- auction 770516 moved from
+        --     Aug 24 to Aug 25 and only this column followed.
+        --  2. the copy embedded in the lot payload, which is a point-in-time
+        --     snapshot taken when the LOT was scraped and goes stale the
+        --     moment the auction is extended.
+        --  3. eventDateEnd, the event's end DATE at midnight, ~19 hours early
+        --     by construction. A last resort, not an equivalent.
+        --
+        -- Reading 3 as UTC is what hid live lots and made "has this closed"
+        -- wrong by up to 46 hours. All three are Toronto-local at source.
+        coalesce(
+            (h.bid_close_local at time zone 'America/Toronto'),
+            a.bid_close_at,
+            a.event_ends_at
+        )                                            as event_ends_at
 
     from {{ ref('stg_hibid_lots') }} l
     left join {{ ref('stg_auctions') }} a on a.auction_id = l.auction_id
+    left join {{ ref('stg_hibid_auctions') }} h on h.auction_id = l.auction_id
 
 ),
 
@@ -59,7 +90,10 @@ police_lots as (
         lot_id,
         title,
         lot_url,
-        high_bid,
+        -- Same monotonic peak as the HiBid branch above: bids cannot fall, so
+        -- the max over a lot's observations is its current price while open
+        -- and its final price once closed.
+        max(high_bid) over (partition by source, item_id) as high_bid,
         min_bid,
         null::bigint     as bid_count,      -- not published per listing
         lot_status,
