@@ -109,6 +109,18 @@ class Config:
     # dbt project location. Empty means "look beside, then above, this module".
     dbt_project_dir: str = ""
 
+    # Telegram alerting for wishlist matches. Both empty disables the notifier,
+    # which is what keeps every other flow runnable without them — only
+    # notify_wishlist reads these, and it declines rather than fails when they
+    # are absent.
+    #
+    # Deliberately this project's own bot and chat rather than job_searcher's.
+    # Sharing that one would work on the first day and be regretted after: the
+    # two feeds have different urgency (a job posting keeps, a lot closes this
+    # evening), and muting one would mute the other.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # Rate limiting
     request_delay_min: int = 2
     request_delay_max: int = 5
@@ -153,6 +165,8 @@ class Config:
             flaresolverr_timeout_ms=int(os.getenv("FLARESOLVERR_TIMEOUT_MS", "60000")),
             flaresolverr_proxy=os.getenv("FLARESOLVERR_PROXY", "").strip(),
             dbt_project_dir=os.getenv("DBT_PROJECT_DIR", "").strip(),
+            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
             request_delay_min=int(os.getenv("REQUEST_DELAY_MIN", "2")),
             request_delay_max=int(os.getenv("REQUEST_DELAY_MAX", "5")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),

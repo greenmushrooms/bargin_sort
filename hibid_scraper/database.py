@@ -40,6 +40,7 @@ DDL_FILES = (
     "008_catalog_pages.sql",
     "009_catalog_page_attempts.sql",
     "010_catalog_end_page.sql",
+    "011_wishlist_alerts.sql",
 )
 
 # Rows buffered before a write. A full scrape is ~30k rows and committing each

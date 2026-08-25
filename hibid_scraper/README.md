@@ -46,6 +46,51 @@ Build the image from the **repository root** so it includes the dbt project:
 docker build -f hibid_scraper/Dockerfile -t integration-bargin-sort .
 ```
 
+## Wishlist alerts
+
+`notify_wishlist` (`notify.py`) sends new wishlist matches to Telegram at 09:30,
+behind the three morning scrapes. The matching rules are the
+`reference.wishlist` seed; the flow only decides what is *new*.
+
+A match is announced **once**, not once per run. A wishlist match stays matched
+for the ~4 days its lot stays open, so re-sending live matches daily would bury
+whatever actually turned up overnight. `raw.wishlist_alerts` records what has
+been said, and only after the Bot API confirms the send — recording on attempt
+would let one failed request silence a lot permanently. Lots already bid past
+their row's `max_bid_cad` are skipped rather than announced.
+
+The query is kept in step with `analyses/wishlist_check.sql` deliberately: that
+is what a human runs to ask "is there one right now", and an alert that
+disagreed with it would not be trustworthy.
+
+Two secret blocks are required, and must exist **before** `prefect deploy` —
+otherwise the templates resolve to nothing and the flow skips every morning:
+
+```bash
+prefect block create secret --name bargin-sort--telegram-bot-token
+prefect block create secret --name bargin-sort--telegram-chat-id
+```
+
+Use a bot of this project's own rather than another project's. The two feeds
+have different urgency — a job posting keeps for a week, a lot closes this
+evening — so a shared chat means muting one mutes the other. Get a token from
+[@BotFather](https://t.me/BotFather); get the chat id by messaging the new bot
+once and reading `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+
+Check a new wishlist row before trusting it with a schedule — a dry run formats
+and logs the message without sending or recording anything:
+
+```bash
+python notify.py --dry-run
+```
+
+Adding or editing a wishlist row means re-seeding, since the flow only runs
+`dbt run`:
+
+```bash
+cd ../data__bargin_sort && dbt seed --profiles-dir .
+```
+
 ## Cloudflare and FlareSolverr
 
 HiBid sits behind Cloudflare, which intermittently answers plain HTTP clients

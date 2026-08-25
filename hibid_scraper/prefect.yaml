@@ -162,6 +162,48 @@ deployments:
           DB_PASSWORD: "{{ prefect.blocks.secret.bargin-sort--database-password }}"
           DB_NAME: "{{ prefect.blocks.secret.bargin-sort--database-name }}"
 
+  - name: wishlist-notify-deployment
+    entrypoint: notify.py:notify_wishlist
+    # 09:30, behind all three scrapes and their dbt builds — police at 05:30,
+    # discovery at 07:30, closing catalogues at 08:00. Reading silver before
+    # the last of those lands would announce yesterday's picture and, worse,
+    # mark today's lots as already-told.
+    #
+    # Still hours ahead of the afternoon and evening closes, which is the
+    # constraint that matters: an alert is only worth sending while there is
+    # time to bid on what it names.
+    #
+    # One deployment, not a step inside each scrape: each scrape sees only its
+    # own slice, so a notifier bolted onto them would fire three times a
+    # morning and split one list across three messages.
+    schedules:
+      - cron: "30 9 * * *"
+        timezone: "America/Toronto"
+    parameters:
+      # Set true to have a run format and log the message without sending or
+      # recording it — how a new wishlist row gets checked before it is trusted.
+      dry_run: false
+    work_pool:
+      name: dev-pool-docker
+      job_variables:
+        image: integration-bargin-sort:latest
+        networks:
+          - project-hub-network
+        env:
+          PREFECT_LOGGING_EXTRA_LOGGERS: "database,notify"
+          DB_HOST: "{{ prefect.blocks.secret.bargin-sort--database-host }}"
+          DB_PORT: "{{ prefect.blocks.secret.bargin-sort--database-port }}"
+          DB_USER: "{{ prefect.blocks.secret.bargin-sort--database-user }}"
+          DB_PASSWORD: "{{ prefect.blocks.secret.bargin-sort--database-password }}"
+          DB_NAME: "{{ prefect.blocks.secret.bargin-sort--database-name }}"
+          # This project's own bot, deliberately not job_searcher's. The two
+          # feeds have different urgency — a job posting keeps for a week, a lot
+          # closes this evening — and sharing a chat means muting one mutes the
+          # other. Both blocks must exist before `prefect deploy`, or the
+          # template resolves to nothing and the flow skips every morning.
+          TELEGRAM_BOT_TOKEN: "{{ prefect.blocks.secret.bargin-sort--telegram-bot-token }}"
+          TELEGRAM_CHAT_ID: "{{ prefect.blocks.secret.bargin-sort--telegram-chat-id }}"
+
   - name: raw-retention
     entrypoint: maintenance.py:raw_retention
     # Daily rather than monthly. Dropping is a no-op on all but the first day
@@ -188,4 +230,30 @@ deployments:
           DB_USER: "{{ prefect.blocks.secret.bargin-sort--database-user }}"
           DB_PASSWORD: "{{ prefect.blocks.secret.bargin-sort--database-password }}"
           DB_NAME: "{{ prefect.blocks.secret.bargin-sort--database-name }}"
+          PREFECT_LOGGING_EXTRA_LOGGERS: "scraper,database,transform,main,maintenance"
+
+  - name: flaresolverr-reap
+    entrypoint: maintenance.py:flaresolverr_reap
+    # Unscheduled on purpose. The fetcher no longer strands sessions, so this
+    # is a recovery lever rather than routine upkeep — reach for it after a
+    # FlareSolverr wobble, when Chrome starts refusing to launch. It refuses to
+    # run while a scrape of the same source is in flight, so it is safe to fire
+    # at any time; it will simply decline and say so.
+    schedules: []
+    parameters:
+      source: hibid
+      dry_run: false
+    work_pool:
+      name: dev-pool-docker
+      job_variables:
+        image: integration-bargin-sort:latest
+        networks:
+          - project-hub-network
+        env:
+          DB_HOST: "{{ prefect.blocks.secret.bargin-sort--database-host }}"
+          DB_PORT: "{{ prefect.blocks.secret.bargin-sort--database-port }}"
+          DB_USER: "{{ prefect.blocks.secret.bargin-sort--database-user }}"
+          DB_PASSWORD: "{{ prefect.blocks.secret.bargin-sort--database-password }}"
+          DB_NAME: "{{ prefect.blocks.secret.bargin-sort--database-name }}"
+          FLARESOLVERR_URL: "http://flaresolverr:8191/v1"
           PREFECT_LOGGING_EXTRA_LOGGERS: "scraper,database,transform,main,maintenance"

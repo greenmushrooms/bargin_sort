@@ -61,3 +61,6 @@ logs/
 
 # dbt local user id
 .user.yml
+
+# Go build output
+web/api/bin/
