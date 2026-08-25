@@ -1,0 +1,14 @@
+{{/* The six verdicts, plus the seventh and most important: no verdict at all.
+     A lot with no row in web.lot_review is unread, which is what makes the
+     list a queue. Clicking the verdict a lot already has clears it. */}}
+<div class="review-bar" id="review-{{ .Source }}-{{ .ItemID }}">
+  {{ $s := .Source }}{{ $i := .ItemID }}{{ $cur := .Verdict }}
+  {{ range .Verdicts }}
+  <button type="button"
+          class="verdict {{ if eq $cur . }}on{{ end }}"
+          hx-post="/lot/{{ $s }}/{{ $i }}/review"
+          hx-vals='{"verdict": "{{ . }}"}'
+          hx-target="#review-{{ $s }}-{{ $i }}"
+          hx-swap="outerHTML">{{ . }}</button>
+  {{ end }}
+</div>

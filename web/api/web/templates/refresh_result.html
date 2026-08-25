@@ -1,0 +1,24 @@
+{{/* What one refresh learned. A failure is shown here, not as an HTTP error:
+     a withdrawn lot and a Cloudflare block are things to tell the user in the
+     pane they are looking at. */}}
+<div class="refresh-result" id="refresh-{{ .Source }}-{{ .ItemID }}">
+  {{ if .Error }}
+    <p class="refresh-error">{{ .Error }}</p>
+  {{ else if .Snapshot }}
+    {{ with .Snapshot }}
+    <p class="refresh-figures">
+      <strong>{{ money .HighBid }}</strong>
+      {{ if .BidCount }}<span class="bids">{{ .BidCount }} bids</span>{{ end }}
+      <span class="status {{ if eq .LotStatus "CLOSED" }}closed{{ end }}">{{ .LotStatus }}</span>
+      {{ if .TimeLeft }}<span class="left">{{ .TimeLeft }}</span>{{ end }}
+    </p>
+    {{ if .ImageURLs }}
+    <div class="gallery">
+      {{ range .ImageURLs }}<img src="{{ . }}" loading="lazy" alt="">{{ end }}
+    </div>
+    {{ end }}
+    {{ end }}
+  {{ else }}
+    <p class="refresh-error">Refreshed, but no snapshot was recorded.</p>
+  {{ end }}
+</div>

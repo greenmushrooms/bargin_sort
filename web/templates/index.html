@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+
+{% block body %}
+<div id="error-banner" hidden>
+  <span class="eb-msg"></span>
+  <button class="eb-close" onclick="this.parentElement.hidden = true">✕</button>
+</div>
+
+<div class="layout">
+
+  {# Left: the wishlist itself, which is the real navigation. Each row is a
+     standing question ("is there a mini PC right now") and its count is the
+     answer. The partial carries its own <aside> and hx-* attributes so the
+     same file serves the first render and every later swap. #}
+  {% include "sidebar.html" %}
+
+  <section class="middle">
+    {# Every list request sends this form. Keeping the filter in one place is
+       what makes a review click, a re-sort and a search come back to the same
+       view instead of resetting it. #}
+    <form id="filter-form" onsubmit="return false"
+          hx-trigger="none">
+      <input type="hidden" name="slug" value="{{ filters.slug or '' }}">
+
+      <input class="search" type="search" name="q" value="{{ filters.q }}"
+             autocomplete="off"
+             placeholder="Search all live lots — or /regex to try a rule"
+             hx-get="/lots" hx-target="#lot-list" hx-swap="innerHTML"
+             hx-include="#filter-form"
+             hx-trigger="keyup changed delay:400ms, search">
+
+      <div class="filter-row">
+        <select name="sort"
+                hx-get="/lots" hx-target="#lot-list" hx-swap="innerHTML"
+                hx-include="#filter-form" hx-trigger="change">
+          <option value="priority" {% if filters.sort == 'priority' %}selected{% endif %}>Most wanted</option>
+          <option value="closing"  {% if filters.sort == 'closing'  %}selected{% endif %}>Closing soonest</option>
+          <option value="cheapest" {% if filters.sort == 'cheapest' %}selected{% endif %}>Cheapest to enter</option>
+          <option value="distance" {% if filters.sort == 'distance' %}selected{% endif %}>Nearest</option>
+          <option value="bids"     {% if filters.sort == 'bids'     %}selected{% endif %}>Most bids</option>
+          <option value="condition" {% if filters.sort == 'condition' %}selected{% endif %}>Best condition</option>
+        </select>
+
+        <label class="toggle">
+          <input type="checkbox" name="budget" value="1" {% if filters.budget %}checked{% endif %}
+                 hx-get="/lots" hx-target="#lot-list" hx-swap="innerHTML"
+                 hx-include="#filter-form" hx-trigger="change">
+          Within cap
+        </label>
+
+        <label class="toggle">
+          <input type="checkbox" name="hide_judged" value="1" {% if filters.hide_judged %}checked{% endif %}
+                 hx-get="/lots" hx-target="#lot-list" hx-swap="innerHTML"
+                 hx-include="#filter-form" hx-trigger="change">
+          Hide judged
+        </label>
+
+        {# Sealed or new-in-open-box only. Deliberately not 'tested': that is a
+           working-order claim about a loose unit, not a box. #}
+        <label class="toggle">
+          <input type="checkbox" name="boxed" value="1" {% if filters.boxed %}checked{% endif %}
+                 hx-get="/lots" hx-target="#lot-list" hx-swap="innerHTML"
+                 hx-include="#filter-form" hx-trigger="change">
+          Closed boxes
+        </label>
+      </div>
+
+      <div class="chips">
+        {# "unread" is a real state here, not a placeholder: no row in
+           lot_review is what makes the queue a queue. #}
+        <button type="button" class="chip {% if not filters.status %}on{% endif %}"
+                onclick="setStatus('')">All</button>
+        <button type="button" class="chip {% if filters.status == 'unread' %}on{% endif %}"
+                onclick="setStatus('unread')">Unread {{ counts.get('unread', 0) }}</button>
+        {% for value in REVIEW_STATUSES %}
+        <button type="button" class="chip s-{{ value }} {% if filters.status == value %}on{% endif %}"
+                onclick="setStatus('{{ value }}')">
+          {{ REVIEW_LABELS[value] }} {{ counts.get(value, 0) }}
+        </button>
+        {% endfor %}
+      </div>
+
+      <input type="hidden" name="status" value="{{ filters.status or '' }}">
+    </form>
+
+    <div id="lot-list"
+         hx-get="/lots"
+         hx-trigger="filter-changed from:body, lot-updated from:body"
+         hx-include="#filter-form"
+         hx-target="this" hx-swap="innerHTML">
+      {% include "lot_list.html" %}
+    </div>
+  </section>
+
+  <section id="detail" class="detail">
+    <div class="detail-empty">
+      <p>Pick a lot.</p>
+      <p class="hint">
+        The list on the left is every live lot matching a wishlist row, priced
+        as of the last pipeline build. Open one and press <b>Refresh</b> to
+        fetch its current price and the rest of its photographs straight from
+        the source.
+      </p>
+    </div>
+  </section>
+
+</div>
+{% endblock %}

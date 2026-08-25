@@ -1,0 +1,27 @@
+[project]
+name = "bargin-sort-web"
+version = "0.1.0"
+description = "Local triage site for bargin_sort wishlist matches"
+readme = "README.md"
+requires-python = ">=3.10"
+
+# Deliberately not depending on hibid_scraper as a package: the two share a
+# repository, not a distribution, and web/scraper_bridge.py imports its modules
+# by path. What is listed here is therefore the union of what the site needs
+# and what the borrowed scraper modules need — minus prefect and dbt, which
+# only the flows use and which would triple the size of this environment.
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "jinja2>=3.1.0",
+    "python-multipart>=0.0.9",   # form posts from the review bar
+    "psycopg2-binary>=2.9.9",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",          # used by the scraper's PageFetcher
+    "beautifulsoup4>=4.12.0",    # used by apollo + the Police Auctions parse
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0.0",
+]

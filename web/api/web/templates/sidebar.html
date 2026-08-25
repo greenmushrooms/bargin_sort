@@ -1,0 +1,14 @@
+<h1>wishlist</h1>
+<ul class="wishlist">
+  <li class="{{ if eq .Selected "" }}on{{ end }}">
+    <a hx-get="/lots" hx-target="#lots" hx-push-url="/" href="/">all</a>
+  </li>
+  {{ range .Sidebar }}
+  <li class="{{ if eq $.Selected .Slug }}on{{ end }} {{ if eq .Live 0 }}empty{{ end }}">
+    <a hx-get="/lots?slug={{ .Slug }}" hx-target="#lots"
+       hx-push-url="/?slug={{ .Slug }}" href="/?slug={{ .Slug }}">
+      {{ .Label }}<span class="count">{{ .Live }}</span>
+    </a>
+  </li>
+  {{ end }}
+</ul>

@@ -1,0 +1,72 @@
+{# Rendered both inside index.html and on its own for htmx swaps, so the
+   outermost element carries the id and the hx-* attributes either way. #}
+<aside id="sidebar"
+       hx-get="/sidebar"
+       hx-trigger="lot-updated from:body"
+       hx-include="#filter-form"
+       hx-target="this"
+       hx-swap="outerHTML">
+
+  <header class="brand">
+    <h1>bargin<span>_</span>sort</h1>
+    {% if build %}
+      <p class="build">
+        <b>{{ build.match_count }}</b> matches over
+        {{ '{:,}'.format(build.lots_considered or 0) }} live lots ·
+        screened {{ build.built_at | ago }}
+      </p>
+    {% else %}
+      <p class="build building">Building the match set…</p>
+    {% endif %}
+
+    <div class="brand-actions">
+      <button class="btn small"
+              hx-post="/rescan" hx-include="#filter-form"
+              hx-target="#sidebar" hx-swap="outerHTML">
+        Rescan
+      </button>
+      {% if stale %}
+        <span class="stale" title="fct_lots or the wishlist seed has moved since this was built">stale</span>
+      {% endif %}
+      <span class="htmx-indicator spinner"></span>
+    </div>
+  </header>
+
+  <nav class="groups">
+    {# One lot can satisfy two wishlist rows — a mini PC that is also storage —
+       and it is listed under both. The total is therefore matches, not lots,
+       which is the same grain the Telegram alert counts in. #}
+    <button type="button"
+            class="wl-group {% if not active_slug %}active{% endif %}"
+            data-slug="" onclick="selectGroup('')">
+      <span class="wl-label">Everything</span>
+      <span class="wl-n">{{ (build.match_count if build else 0) or 0 }}</span>
+    </button>
+
+    {% for g in groups %}
+    <button type="button"
+            class="wl-group p{{ g.priority }} {% if active_slug == g.slug %}active{% endif %} {% if not g.n %}empty{% endif %}"
+            data-slug="{{ g.slug }}" onclick="selectGroup('{{ g.slug }}')"
+            title="{{ g.notes or '' }}">
+      <span class="wl-label">{{ g.label }}</span>
+      {# The unread count is the one that means "there is work here"; the
+         total is context. A row showing 12 with 0 unread has been dealt
+         with, and should not pull the eye the same way. #}
+      <span class="wl-n {% if g.n_unread %}unread{% endif %}">
+        {% if g.n_unread %}{{ g.n_unread }}{% else %}{{ g.n }}{% endif %}
+      </span>
+      <span class="wl-meta">
+        cap {{ g.max_bid_cad | money }}
+        {%- if g.n_starred %} · ★{{ g.n_starred }}{% endif %}
+        {%- if g.n and g.n_in_budget < g.n %} · {{ g.n_in_budget }} in cap{% endif %}
+      </span>
+    </button>
+    {% endfor %}
+  </nav>
+
+  <p class="sidebar-note">
+    Rows come from <code>reference.wishlist</code>, the dbt seed. A row that
+    never matches is a hypothesis, not a bug — edit
+    <code>seeds/wishlist.csv</code>, run <code>dbt seed</code>, then Rescan.
+  </p>
+</aside>

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>bargin_sort — triage</title>
+  <link rel="stylesheet" href="/static/go-app.css">
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/go-select.js" defer></script>
+</head>
+<body>
+
+{{/* The action bar is fixed at the top and always present. Verdicts live here
+     rather than on each row: one set of controls that acts on whatever is
+     selected, instead of six buttons repeated sixty-six times. */}}
+<header class="topbar">
+  <div class="tb-row">
+    <span class="brand">bargin<span>_</span>sort</span>
+
+    <select class="picker" name="slug"
+            hx-get="/lots" hx-target="#lots" hx-swap="innerHTML"
+            hx-trigger="change" aria-label="Filter by wishlist row">
+      <option value="">all · {{ len .Lots }}</option>
+      {{ range .Sidebar }}
+      <option value="{{ .Slug }}" {{ if eq $.Selected .Slug }}selected{{ end }}>
+        {{ .Label }} · {{ .Live }}
+      </option>
+      {{ end }}
+    </select>
+
+    <input class="search" type="search" name="q" placeholder="search · /regex"
+           hx-get="/search" hx-target="#lots" hx-swap="innerHTML"
+           hx-trigger="keyup changed delay:400ms, search"
+           aria-label="Search every live lot">
+  </div>
+
+  {{/* Disabled until something is selected, so the bar never looks like it
+       will act on the whole list. */}}
+  <div class="tb-row actions" id="actionbar" data-empty="true">
+    <span class="selcount"><b data-count>0</b> selected</span>
+    {{ range .Verdicts }}
+    <button type="button" class="act a-{{ . }}" data-needs-selection
+            hx-post="/review/bulk" hx-include="#bulk-form"
+            hx-vals='{"verdict": "{{ . }}"}'
+            hx-target="#lots" hx-swap="innerHTML">{{ . }}</button>
+    {{ end }}
+    <button type="button" class="act clear" data-needs-selection
+            hx-post="/review/bulk" hx-include="#bulk-form"
+            hx-vals='{"verdict": "clear"}'
+            hx-target="#lots" hx-swap="innerHTML">no verdict</button>
+    <button type="button" class="act ghost" data-select-cancel>done</button>
+  </div>
+</header>
+
+<main class="panes">
+  <section class="pane pane-list" id="lots">{{ template "lot_list.html" . }}</section>
+  <div class="splitter" id="splitter" role="separator" aria-orientation="vertical"
+       tabindex="0" aria-label="Resize list pane"></div>
+  <section class="pane pane-detail" id="detail">
+    <p class="placeholder">Tap a lot to see it here. Hold one to start selecting, then shift-click for a range.</p>
+  </section>
+</main>
+
+</body>
+</html>

@@ -1,0 +1,203 @@
+/* bargin_sort — Go triage UI.
+   Self-contained: this page does NOT load app.css, which describes the Python
+   site's DOM and shares class names with this one. Its `.lot-row { display:
+   grid }` landed on table rows here and collapsed the layout, so the two
+   stylesheets are kept apart on purpose. Tokens are copied so both still look
+   like one product. */
+
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --sunk:#eef0f3;
+  --line:#e4e6ea; --line-soft:#f0f1f4;
+  --ink:#1d2129; --ink-dim:#6b7280; --ink-faint:#9ca3af;
+  --accent:#1a4ed8; --accent-soft:#eef2ff;
+  --good:#0a7d2e; --warn:#b07d00; --bad:#b00020; --gold:#b8860b;
+  --r:8px;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#14161a; --panel:#1b1e24; --sunk:#22262e;
+    --line:#2a2e37; --line-soft:#23272f;
+    --ink:#e6e8ec; --ink-dim:#9aa3b2; --ink-faint:#6b7482;
+    --accent:#7da2ff; --accent-soft:#1e2740;
+    --good:#4ade80; --warn:#e3b341; --bad:#ff6b81; --gold:#d4a537;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#14161a; --panel:#1b1e24; --sunk:#22262e;
+  --line:#2a2e37; --line-soft:#23272f;
+  --ink:#e6e8ec; --ink-dim:#9aa3b2; --ink-faint:#6b7482;
+  --accent:#7da2ff; --accent-soft:#1e2740;
+  --good:#4ade80; --warn:#e3b341; --bad:#ff6b81; --gold:#d4a537;
+}
+
+*{ box-sizing:border-box; }
+html{ height:100%; }
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font-size:15px; line-height:1.45;
+}
+:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+
+/* ---------- top bar ---------- */
+.topbar{
+  position:fixed; top:0; left:0; right:0; z-index:30;
+  /* Translucent so the list visibly runs underneath rather than stopping at a
+     hard edge -- that is what makes it read as an overlay instead of a header.
+     The solid fallback comes first for engines without backdrop-filter. */
+  background:var(--panel);
+  background:color-mix(in srgb, var(--panel) 80%, transparent);
+  -webkit-backdrop-filter:blur(12px) saturate(1.4);
+  backdrop-filter:blur(12px) saturate(1.4);
+  border-bottom:1px solid var(--line);
+  display:flex; flex-direction:column; gap:.4rem; padding:.5rem .7rem;
+}
+.tb-row{ display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
+.brand{ font-weight:700; font-size:.95rem; letter-spacing:-.02em; }
+.brand span{ color:var(--accent); }
+.picker,.search{
+  font:inherit; font-size:.85rem; padding:.3rem .45rem;
+  border:1px solid var(--line); border-radius:var(--r);
+  background:var(--panel); color:var(--ink); min-width:0;
+}
+.picker{ max-width:15rem; }
+.search{ flex:1; min-width:8rem; }
+
+/* The action bar is always present, and dims rather than disappears so its
+   position never shifts under a thumb mid-tap. */
+.actions{ gap:.3rem; }
+.actions[data-empty="true"] .selcount{ color:var(--ink-faint); }
+.actions[data-empty="true"] .act[data-needs-selection]{ opacity:.4; pointer-events:none; }
+.actions[data-empty="true"] .act.ghost{ display:none; }
+.selcount{ font-size:.78rem; color:var(--ink-dim); margin-right:.2rem; }
+.selcount b{ font-variant-numeric:tabular-nums; }
+.act{
+  font:inherit; font-size:.76rem; padding:.3rem .55rem; cursor:pointer;
+  border:1px solid var(--line); border-radius:99px;
+  background:var(--panel); color:var(--ink-dim);
+}
+.act:hover{ border-color:var(--accent); color:var(--accent); }
+.act.a-starred{ color:var(--gold); border-color:color-mix(in srgb,var(--gold) 45%,var(--line)); }
+.act.a-false_positive,.act.clear{ color:var(--bad); border-color:color-mix(in srgb,var(--bad) 35%,var(--line)); }
+.act.ghost{ margin-left:auto; color:var(--accent); border-color:var(--accent); }
+
+/* ---------- two panes ---------- */
+.panes{
+  height:100dvh; min-height:0;
+  display:grid;
+  /* The list width is a live variable the splitter writes to, remembered in
+     localStorage. The middle track is the drag handle itself. */
+  grid-template-columns:var(--list-w,52%) 10px minmax(0,1fr);
+  gap:0; padding:.6rem;
+  /* Clears the fixed bar. The fallback matters: if the measuring script never
+     runs, the panes must still start below the bar rather than under it. */
+  padding-top:calc(var(--topbar-h,96px) + .6rem);
+}
+.splitter{
+  cursor:col-resize; align-self:stretch; position:relative;
+  display:grid; place-items:center;
+}
+.splitter::before{
+  content:""; width:2px; height:100%; background:var(--line); border-radius:2px;
+}
+.splitter:hover::before,.splitter.dragging::before{ background:var(--accent); width:3px; }
+/* While dragging, the pointer must not select text or land on the panes. */
+body.resizing{ cursor:col-resize; -webkit-user-select:none; user-select:none; }
+body.resizing .pane{ pointer-events:none; }
+.pane{
+  min-height:0; height:100%; overflow-y:auto; -webkit-overflow-scrolling:touch;
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
+}
+.placeholder{ color:var(--ink-faint); font-size:.85rem; padding:1rem; margin:0; }
+
+@media (max-width:860px){
+  /* One pane on a phone, and no splitter -- there is nothing to split. */
+  .panes{ grid-template-columns:minmax(0,1fr); height:auto; min-height:100dvh; }
+  .splitter{ display:none; }
+  .pane{ height:auto; max-height:none; }
+  .pane-detail:not(.open){ display:none; }
+}
+
+/* ---------- rows ---------- */
+.lots{ list-style:none; margin:0; padding:0; }
+.trow{
+  display:flex; align-items:flex-start; gap:.5rem;
+  padding:.55rem .6rem; border-bottom:1px solid var(--line-soft);
+  cursor:pointer; -webkit-user-select:none; user-select:none;
+  -webkit-touch-callout:none; border-left:3px solid transparent;
+}
+.trow:last-child{ border-bottom:none; }
+.trow:hover{ background:var(--sunk); }
+.trow input[name="lot"]{ display:none; }
+.trow .tick{ display:none; }
+
+/* Selection mode: a tick appears at the head of every row. */
+.selecting .trow .tick{
+  display:grid; place-items:center; flex:none;
+  width:17px; height:17px; margin-top:.15rem;
+  border:1px solid var(--line); border-radius:4px; background:var(--panel);
+}
+.selecting .trow.picked .tick{ background:var(--accent); border-color:var(--accent); }
+.selecting .trow.picked .tick::after{ content:"✓"; color:#fff; font-size:.68rem; line-height:1; }
+.trow.picked{ background:var(--accent-soft); border-left-color:var(--accent); }
+.trow.current{ border-left-color:var(--accent); }
+
+.trow .main{ flex:1; min-width:0; display:flex; flex-direction:column; gap:.1rem; }
+.ttl{ font-size:.86rem; line-height:1.3; }
+.meta{
+  display:flex; flex-wrap:wrap; gap:.4rem;
+  font-size:.7rem; color:var(--ink-faint);
+  font-variant-numeric:tabular-nums;
+}
+.slug{ color:var(--ink-dim); }
+.until{ color:var(--ink-dim); }
+.stale{ color:var(--warn); }
+.figs{ text-align:right; white-space:nowrap; display:flex; flex-direction:column; }
+.figs b{ font-size:.9rem; font-variant-numeric:tabular-nums; }
+.cap{ font-size:.68rem; color:var(--ink-faint); }
+
+.badge{
+  font-size:.63rem; text-transform:uppercase; letter-spacing:.05em;
+  padding:.02rem .28rem; border-radius:3px; border:1px solid currentColor;
+}
+.b-starred{ color:var(--gold); }
+.b-false_positive{ color:var(--bad); }
+.b-passed,.b-lost{ color:var(--ink-faint); }
+.b-bidding,.b-won{ color:var(--good); }
+.verdict-passed,.verdict-lost,.verdict-false_positive{ opacity:.6; }
+.bulk-note{ color:var(--good); font-size:.8rem; padding:.4rem .6rem; margin:0; }
+
+/* ---------- detail ---------- */
+.lot-detail{ padding:.8rem; display:flex; flex-direction:column; gap:.5rem; }
+.lot-detail h2{ font-size:1rem; margin:0; line-height:1.3; }
+.lot-detail .meta{ font-size:.75rem; }
+.figures{ display:flex; align-items:baseline; gap:.7rem; margin:0; }
+.figures strong{ font-size:1.3rem; font-variant-numeric:tabular-nums; }
+.stale-close{ color:var(--warn); font-size:.8rem; margin:0; }
+.refresh-error{ color:var(--bad); font-size:.8rem; margin:0; }
+.refresh-figures{ display:flex; gap:.6rem; font-size:.8rem; margin:0; }
+.status.closed{ color:var(--bad); }
+.gallery{ display:flex; flex-wrap:wrap; gap:.3rem; }
+.gallery img{ width:88px; height:88px; object-fit:cover; border-radius:var(--r); }
+.descr{ font-size:.82rem; color:var(--ink-dim); white-space:pre-wrap; }
+button.refresh{
+  font:inherit; font-size:.8rem; padding:.35rem .7rem; align-self:flex-start;
+  border:1px solid var(--accent); border-radius:var(--r);
+  background:var(--panel); color:var(--accent); cursor:pointer;
+}
+.review-bar{ display:flex; flex-wrap:wrap; gap:.25rem; }
+button.verdict{
+  font:inherit; font-size:.74rem; padding:.25rem .5rem; cursor:pointer;
+  border:1px solid var(--line); border-radius:99px;
+  background:var(--panel); color:var(--ink-dim);
+}
+button.verdict.on{ background:var(--accent); border-color:var(--accent); color:#fff; }
+.history{ font-size:.76rem; color:var(--ink-dim); padding:0 .8rem .8rem; }
+.history ul{ list-style:none; padding:0; margin:.2rem 0 0; }
+.history .when{ color:var(--ink-faint); margin-right:.4rem; }
+.lot-gone{ padding:1rem; color:var(--ink-dim); font-size:.85rem; }
+.search-meta{ font-size:.78rem; color:var(--ink-dim); padding:.4rem .6rem; }
+.search-error{ color:var(--bad); }
+.htmx-indicator{ display:none; }
+.htmx-request .htmx-indicator,.htmx-indicator.htmx-request{ display:inline; }
+@media (prefers-reduced-motion:reduce){ *{ transition:none !important; } }

@@ -1,0 +1,16 @@
+{# A lot that is no longer live. Not an error: lots close constantly, and a
+   list rendered five minutes ago will contain some. #}
+<div class="detail-empty">
+  <p>This lot is no longer live.</p>
+  <p class="hint">
+    It has closed, or its auction has, since the list was drawn. The verdict and
+    notes recorded against it are kept — <code>web.lot_review</code> outlives the
+    listing on purpose.
+  </p>
+  <p class="hint">
+    <a href="{{ 'https://hibid.com/lot/' ~ item_id if source == 'hibid'
+              else 'https://policeauctionscanada.com/Listing/Details/' ~ item_id }}"
+       target="_blank" rel="noopener">Open it on {{ 'HiBid' if source == 'hibid' else 'Police Auctions' }}</a>
+    to see what it went for.
+  </p>
+</div>

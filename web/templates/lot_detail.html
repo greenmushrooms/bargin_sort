@@ -1,0 +1,118 @@
+{# The detail pane. Re-rendered whole after a refresh or a verdict, because
+   both change several things at once (prices, photos, badges, the freshness
+   line) and a partial swap would leave the pane internally inconsistent. #}
+<article class="lot-detail" data-source="{{ lot.source }}" data-item="{{ lot.item_id }}">
+
+  {% if just_refreshed and just_refreshed.error %}
+    <div class="banner bad">
+      <b>Refresh failed.</b> {{ just_refreshed.error }}
+      <span class="dim">Figures below are the last ones known.</span>
+    </div>
+  {% elif just_refreshed and just_refreshed.ok %}
+    <div class="banner good"><b>Refreshed.</b> Prices and photos are current as of now.</div>
+  {% endif %}
+
+  <header class="ld-head">
+    <h2><a href="{{ lot.lot_url }}" target="_blank" rel="noopener">{{ lot.title }}</a></h2>
+    <div class="ld-sub">
+      <span class="src src-{{ lot.source }}">{{ 'HiBid' if lot.source == 'hibid' else 'Police Auctions' }}</span>
+      {% if lot.event_name %}<span>{{ lot.event_name }}</span>{% endif %}
+      {% if lot.event_city %}<span>{{ lot.event_city }}</span>{% endif %}
+      {% if lot.km is not none %}<span>{{ lot.km | int }} km</span>{% endif %}
+    </div>
+    <div class="ld-badges">
+      {% if lot.condition_grade %}
+        <span class="cond big c-{{ lot.condition_grade }}"
+              title="{{ CONDITION_HELP[lot.condition_grade] }}">{{ CONDITION_LABELS[lot.condition_grade] }}</span>
+      {% endif %}
+      {% if lot.brand %}
+        <span class="tier big t-{{ lot.brand_tier }}">{{ lot.brand }} · {{ lot.brand_tier }}</span>
+      {% endif %}
+      {% if lot.condition_grade %}
+        <span class="badge-help">{{ CONDITION_HELP[lot.condition_grade] }}</span>
+      {% endif %}
+    </div>
+    {% if lot.brand_note %}<p class="brand-note">{{ lot.brand_note }}</p>{% endif %}
+  </header>
+
+  <div class="ld-numbers">
+    <div class="stat big">
+      <span class="v">{{ (lot.min_bid if lot.min_bid is not none else lot.high_bid) | money }}</span>
+      <span class="k">to enter</span>
+    </div>
+    <div class="stat">
+      <span class="v">{{ lot.high_bid | money }}</span>
+      <span class="k">standing bid</span>
+    </div>
+    <div class="stat">
+      <span class="v">{{ lot.bid_count if lot.bid_count is not none else '—' }}</span>
+      <span class="k">bids</span>
+    </div>
+    <div class="stat">
+      <span class="v">{{ lot.close_at | closes }}</span>
+      <span class="k">closes{% if lot.time_left %} · {{ lot.time_left }}{% endif %}</span>
+    </div>
+  </div>
+
+  {# The freshness line is deliberately explicit about which of two clocks a
+     number came from. "Priced by the pipeline 6h ago" and "priced 40 seconds
+     ago" are different amounts of trust, and a bid is placed on the strength
+     of that difference. #}
+  <div class="ld-freshness">
+    {% if lot.observed_at %}
+      <span class="fresh">↻ Refreshed {{ lot.observed_at | ago }}</span>
+      {% if lot.refreshed_status and lot.refreshed_status != 'OPEN' %}
+        <span class="over">source says {{ lot.refreshed_status }}</span>
+      {% endif %}
+    {% else %}
+      <span class="dim">Priced by the pipeline {{ lot.scraped_at | ago }} · never refreshed</span>
+    {% endif %}
+    {% if lot.refresh_error and not (just_refreshed and just_refreshed.error) %}
+      <span class="over" title="{{ lot.refresh_error }}">last refresh failed {{ lot.refreshed_at | ago }}</span>
+    {% endif %}
+
+    <form class="ld-refresh"
+          hx-post="/lot/{{ lot.source }}/{{ lot.item_id }}/refresh"
+          hx-target="#detail" hx-swap="innerHTML"
+          hx-disabled-elt="find button">
+      <button class="btn refresh" type="submit">↻ Refresh price &amp; photos</button>
+      <span class="htmx-indicator spinner"></span>
+      <span class="htmx-indicator dim">fetching the lot page — a few seconds…</span>
+    </form>
+  </div>
+
+  {% if lot.wishlist_rows %}
+  <div class="ld-wishlist">
+    {% for w in lot.wishlist_rows %}
+      <span class="wl-chip p{{ w.priority }} {% if not w.within_budget %}over{% endif %}">
+        {{ w.label }} · cap {{ w.max_bid_cad | money }}{% if not w.within_budget %} · over{% endif %}
+      </span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% include "review_bar.html" %}
+
+  {% if lot.images %}
+  <div class="gallery">
+    {% for url in lot.images %}
+      <a href="{{ url }}" target="_blank" rel="noopener">
+        <img src="{{ url }}" alt="" loading="lazy">
+      </a>
+    {% endfor %}
+  </div>
+  {% else %}
+    <p class="dim no-photos">
+      No photographs in the pipeline's copy of this lot. Refresh — the lot page
+      usually carries the gallery even when the catalogue row does not.
+    </p>
+  {% endif %}
+
+  {% if lot.descr %}
+  <details class="ld-descr" open>
+    <summary>Listing text</summary>
+    <div class="descr-body">{{ lot.descr }}</div>
+  </details>
+  {% endif %}
+
+</article>

@@ -1,0 +1,39 @@
+{# The selection controls. One form so the max bid and the note travel with
+   whichever status button is pressed — typing a ceiling and then clicking
+   "Bidding" should record both, not the second one only. #}
+<form class="review"
+      hx-post="/lot/{{ lot.source }}/{{ lot.item_id }}/review"
+      hx-target="#detail" hx-swap="innerHTML">
+
+  <div class="review-buttons">
+    {% for value in REVIEW_STATUSES %}
+      <button type="submit" name="status" value="{{ value }}"
+              class="verdict s-{{ value }} {% if lot.review_status == value %}on{% endif %}"
+              title="{% if lot.review_status == value %}Click again to put this back in the unread queue{% endif %}">
+        {{ REVIEW_LABELS[value] }}
+      </button>
+    {% endfor %}
+  </div>
+
+  <div class="review-fields">
+    <label>
+      My cap
+      <input type="number" name="max_bid" step="0.01" min="0"
+             value="{{ lot.review_max_bid if lot.review_max_bid is not none else '' }}"
+             placeholder="{{ lot.wishlist_rows[0].max_bid_cad if lot.wishlist_rows else '' }}">
+    </label>
+    <input type="text" name="notes" class="note" value="{{ lot.review_notes or '' }}"
+           placeholder="Note — for a false positive, what the regex actually caught">
+  </div>
+
+  {% if lot.review_status %}
+    <p class="review-state">
+      <b class="s-{{ lot.review_status }}">{{ REVIEW_LABELS[lot.review_status] }}</b>
+      {{ lot.reviewed_at | ago }}
+      {%- if lot.review_status == 'false_positive' %}
+        <span class="dim">— this one is a matcher bug; the note is what the next
+        round of regex tuning reads.</span>
+      {% endif %}
+    </p>
+  {% endif %}
+</form>

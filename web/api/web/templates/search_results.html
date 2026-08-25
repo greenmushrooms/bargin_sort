@@ -1,0 +1,13 @@
+{{/* The mode is stated because the two behave differently and a regex that
+     silently ran as a substring would be worse than an error. */}}
+<div class="search-meta">
+  {{ if eq .Mode "empty" }}
+    <span>Type to search title and description across every live lot. Start with <code>/</code> for a regex.</span>
+  {{ else if hasPrefix .Mode "error:" }}
+    <span class="search-error">{{ .Mode }}</span>
+  {{ else }}
+    <span>{{ len .Lots }} match{{ if ne (len .Lots) 1 }}es{{ end }}
+      as {{ .Mode }}{{ if ge (len .Lots) .Limit }} (capped at {{ .Limit }}){{ end }}</span>
+  {{ end }}
+</div>
+{{ template "lot_list.html" . }}

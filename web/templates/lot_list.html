@@ -1,0 +1,41 @@
+{% if mode == "empty" %}
+  <p class="list-empty">Type something to search all live lots.</p>
+
+{% elif mode.startswith("error:") %}
+  {# Regex mode exists to be iterated on, so a bad pattern has to read as a
+     typo rather than a server fault. #}
+  <p class="list-empty error">{{ mode[6:] }}</p>
+
+{% elif not rows %}
+  <p class="list-empty">
+    {% if mode == "wishlist" %}
+      Nothing live matches this{% if filters.budget %} within cap{% endif %}{% if filters.status %} in this state{% endif %}.
+    {% else %}
+      No live lot matches <code>{{ filters.q }}</code>.
+    {% endif %}
+  </p>
+
+{% else %}
+  {% if mode != "wishlist" %}
+    <p class="list-mode">
+      {{ rows | length }}{% if rows | length >= limit %}+{% endif %}
+      live lot{{ 's' if rows | length != 1 }} matching
+      {% if mode == "regex" %}the regex{% else %}“{{ filters.q }}”{% endif %}
+      {%- if rows | length >= limit %} — capped at {{ limit }}{% endif %}
+    </p>
+  {% endif %}
+
+  <ul class="lot-list">
+    {% set ns = namespace(label=None) %}
+    {% for lot in rows %}
+      {% if mode == "wishlist" and filters.sort == "priority" and lot.label != ns.label %}
+        {% set ns.label = lot.label %}
+        <li class="lot-group-head">
+          <span class="p{{ lot.priority }}">{{ lot.label }}</span>
+          <span class="cap">cap {{ lot.max_bid_cad | money }}</span>
+        </li>
+      {% endif %}
+      {% include "lot_row.html" %}
+    {% endfor %}
+  </ul>
+{% endif %}

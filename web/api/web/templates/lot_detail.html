@@ -1,0 +1,64 @@
+{{ with .Lot }}
+<article class="lot-detail" id="lot-{{ .Source }}-{{ .ItemID }}">
+  <header>
+    <h2><a href="{{ .LotURL }}" target="_blank" rel="noopener">{{ .Title }}</a></h2>
+    <p class="meta">
+      {{ .EventName }}{{ if .EventCity }} · {{ .EventCity }}{{ end }}
+      {{ if .KM }} · {{ .KM }} km{{ end }}
+    </p>
+  </header>
+
+  <p class="figures">
+    <strong>{{ money .HighBid }}</strong>
+    {{ if .BidCount }}<span class="bids">{{ .BidCount }} bids</span>{{ end }}
+    <span class="closes">{{ closeTime .CloseAt }} <span class="until">{{ untilClose .CloseAt }}</span></span>
+  </p>
+
+  {{ if .StaleClose }}
+  {{/* The stored close has passed but the lot still reads OPEN. HiBid extends
+       auctions and every close time here is a snapshot, so this is a question
+       rather than a fact -- and only a refresh answers it. */}}
+  <p class="stale-close">
+    Its stored close time has passed but the lot still reads open — it may have
+    been extended. Refresh to find out.
+  </p>
+  {{ end }}
+
+  <div id="refresh-{{ .Source }}-{{ .ItemID }}" class="refresh-result">
+    {{ if .RefreshedAt }}
+      {{ if .RefreshError }}<p class="refresh-error">{{ .RefreshError }}</p>{{ end }}
+      {{ if .LotStatus }}<p class="refresh-figures">
+        <span class="status {{ if eq .LotStatus "CLOSED" }}closed{{ end }}">{{ .LotStatus }}</span>
+        {{ if .TimeLeft }}<span class="left">{{ .TimeLeft }}</span>{{ end }}
+      </p>{{ end }}
+      {{ if .ImageURLs }}<div class="gallery">
+        {{ range .ImageURLs }}<img src="{{ . }}" loading="lazy" alt="">{{ end }}
+      </div>{{ end }}
+    {{ end }}
+  </div>
+
+  <button type="button" class="refresh"
+          hx-post="/lot/{{ .Source }}/{{ .ItemID }}/refresh"
+          hx-target="#refresh-{{ .Source }}-{{ .ItemID }}"
+          hx-swap="outerHTML"
+          hx-indicator="#spin-{{ .Source }}-{{ .ItemID }}">Refresh</button>
+  <span id="spin-{{ .Source }}-{{ .ItemID }}" class="htmx-indicator">fetching…</span>
+
+  {{ template "review_bar.html" (dict "Source" .Source "ItemID" .ItemID "Verdict" .Verdict "Verdicts" $.Verdicts) }}
+
+  {{ if .Descr }}<div class="descr">{{ .Descr }}</div>{{ end }}
+</article>
+{{ end }}
+
+{{ if .History }}
+<section class="history">
+  <h3>history</h3>
+  <ul>
+    {{ range .History }}
+    <li><span class="when">{{ .OccurredAt }}</span>
+        <span class="what">{{ if .Verdict }}{{ .Verdict }}{{ else }}cleared{{ end }}</span>
+        {{ if .Notes }}<span class="why">{{ .Notes }}</span>{{ end }}</li>
+    {{ end }}
+  </ul>
+</section>
+{{ end }}

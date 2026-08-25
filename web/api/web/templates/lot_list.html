@@ -1,0 +1,35 @@
+{{ if .Applied }}<p class="bulk-note">Applied to {{ .Applied }} lot{{ if ne .Applied 1 }}s{{ end }}.</p>{{ end }}
+{{ if not .Lots }}
+  <p class="placeholder">Nothing live here right now.</p>
+{{ else }}
+{{/* A list of rows, not a table: the columns were only ever there to align
+     figures, and a row that can wrap on a phone beats a table that cannot. */}}
+<form id="bulk-form" data-select-root>
+  <ul class="lots">
+  {{ range .Lots }}
+    <li class="trow verdict-{{ if .Verdict }}{{ .Verdict }}{{ else }}none{{ end }}"
+        data-lot="{{ .Source }}:{{ .ItemID }}"
+        data-href="/lot/{{ .Source }}/{{ .ItemID }}">
+      <input type="checkbox" name="lot" value="{{ .Source }}:{{ .ItemID }}"
+             tabindex="-1" aria-label="Select {{ .Title }}">
+      <span class="tick" aria-hidden="true"></span>
+      <span class="main">
+        <span class="ttl">{{ .Title }}</span>
+        <span class="meta">
+          <span class="slug">{{ .Slug }}</span>
+          {{ if .KM }}<span>{{ .KM }} km</span>{{ end }}
+          <span>{{ closeTime .CloseAt }}</span>
+          <span class="until">{{ untilClose .CloseAt }}</span>
+          {{ if .StaleClose }}<span class="stale" title="Stored close has passed but the lot still reads open — may have been extended">may be extended</span>{{ end }}
+          {{ if .Verdict }}<span class="badge b-{{ .Verdict }}">{{ .Verdict }}</span>{{ end }}
+        </span>
+      </span>
+      <span class="figs">
+        <b>{{ money .HighBid }}</b>
+        {{ if .MaxBid }}<span class="cap">cap ${{ .MaxBid }}</span>{{ end }}
+      </span>
+    </li>
+  {{ end }}
+  </ul>
+</form>
+{{ end }}

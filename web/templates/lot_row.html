@@ -1,0 +1,53 @@
+{# One lot in the list. `unread` is the absence of a review row, styled like an
+   unread email because that is exactly what it is: the queue of things nobody
+   has looked at yet. #}
+<li class="lot-row {% if not lot.review_status %}unread{% else %}s-{{ lot.review_status }}{% endif %}
+           {% if not lot.within_budget %}over-cap{% endif %}"
+    id="row-{{ lot.source }}-{{ lot.item_id }}"
+    hx-get="/lot/{{ lot.source }}/{{ lot.item_id }}"
+    hx-target="#detail" hx-swap="innerHTML"
+    onclick="markSelected(this)">
+
+  {% if lot.thumbnail_url %}
+    <img class="lr-thumb" src="{{ lot.thumbnail_url }}" alt="" loading="lazy">
+  {% else %}
+    <span class="lr-thumb lr-nothumb">?</span>
+  {% endif %}
+
+  <div class="lr-body">
+    <div class="lr-title">
+      {% if lot.review_status %}
+        <span class="badge s-{{ lot.review_status }}"
+              title="{{ REVIEW_LABELS[lot.review_status] }}">{{ REVIEW_LABELS[lot.review_status][0] }}</span>
+      {% endif %}
+      {{ lot.title }}
+    </div>
+
+    <div class="lr-facts">
+      {# min_bid is what it costs to enter, so it leads. The standing high bid
+         is context: a lot at $2.50 with a $5 next bid is a $5 decision. #}
+      <b class="lr-entry">{{ (lot.min_bid if lot.min_bid is not none else lot.high_bid) | money }}</b>
+      <span class="dim">to enter</span>
+      {% if lot.high_bid is not none %}<span>· {{ lot.high_bid | money }} now</span>{% endif %}
+      {% if lot.bid_count is not none %}<span>· {{ lot.bid_count }} bid{{ 's' if lot.bid_count != 1 }}</span>{% endif %}
+      {% if lot.km is not none %}<span>· {{ lot.km | int }} km</span>{% endif %}
+      <span class="lr-closes">· {{ lot.close_at | closes }}</span>
+    </div>
+
+    <div class="lr-sub">
+      <span class="src src-{{ lot.source }}">{{ 'HiBid' if lot.source == 'hibid' else 'PAC' }}</span>
+      {% if lot.condition_grade and lot.condition_grade != 'unknown' %}
+        <span class="cond c-{{ lot.condition_grade }}"
+              title="{{ CONDITION_HELP[lot.condition_grade] }}">{{ CONDITION_LABELS[lot.condition_grade] }}</span>
+      {% endif %}
+      {% if lot.brand %}
+        <span class="tier t-{{ lot.brand_tier }}"
+              title="{{ lot.brand }} — {{ TIER_HELP[lot.brand_tier] }}">{{ lot.brand }}</span>
+      {% endif %}
+      {% if lot.event_city %}<span>{{ lot.event_city }}</span>{% endif %}
+      {% if not lot.within_budget %}<span class="over">over cap</span>{% endif %}
+      {% if lot.observed_at %}<span class="fresh" title="refreshed from the source">↻ {{ lot.observed_at | ago }}</span>{% endif %}
+      {% if lot.refresh_error %}<span class="over" title="{{ lot.refresh_error }}">refresh failed</span>{% endif %}
+    </div>
+  </div>
+</li>
